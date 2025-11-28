@@ -614,6 +614,7 @@ def enforce_rec_price_sales_support(
     step = timedelta(hours=config.REC_PRICE_SUPPORT_STEP_HOURS)
     window = timedelta(hours=config.REC_PRICE_SUPPORT_WINDOW_HOURS)
     min_share = config.REC_PRICE_SUPPORT_MIN_SHARE
+    min_window_volume = config.REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME
 
     adjusted_price = rec_price
     t = half_start
@@ -622,7 +623,7 @@ def enforce_rec_price_sales_support(
         window_sales = [s for s in relevant_sales if t <= s.dt <= window_end_ts]
         total_vol = sum(s.amount for s in window_sales)
 
-        if total_vol <= 0:
+        if total_vol < min_window_volume:
             t += step
             continue
 
