@@ -623,17 +623,18 @@ def enforce_rec_price_sales_support(
         total_vol = sum(s.amount for s in window_sales)
 
         if total_vol <= 0:
-            adjusted_price = min(adjusted_price, 0.0)
-        else:
-            required_vol = total_vol * min_share
-            acc = 0
-            candidate_price = 0.0
-            for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
-                acc += sale.amount
-                candidate_price = sale.price
-                if acc >= required_vol:
-                    break
-            adjusted_price = min(adjusted_price, candidate_price)
+            t += step
+            continue
+
+        required_vol = total_vol * min_share
+        acc = 0
+        candidate_price = 0.0
+        for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
+            acc += sale.amount
+            candidate_price = sale.price
+            if acc >= required_vol:
+                break
+        adjusted_price = min(adjusted_price, candidate_price)
 
         t += step
 
