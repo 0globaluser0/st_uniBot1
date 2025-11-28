@@ -366,6 +366,7 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
         return {"old_dips_days": 0.0, "recent_dips_days": 0.0}
 
     base_price = metrics["base_price"]
+    trend_rel_30 = metrics.get("trend_rel_30", 0.0)
     if base_price <= 0:
         return {"old_dips_days": 0.0, "recent_dips_days": 0.0}
 
@@ -387,11 +388,19 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
         if age_days <= config.DIP_RECENT_WINDOW_DAYS:
             low_corridor_rel = config.LOW_CORRIDOR_REL_RECENT
             target_bucket = "recent"
+
+            # Учитываем ожидаемое снижение цены из-за нисходящего тренда,
+            # чтобы стабильные downtrend-графики не попадали в recent_deep_dips.
+            trend_factor = 1.0 + min(trend_rel_30, 0.0) * (
+                config.DIP_RECENT_WINDOW_DAYS / 30.0
+            )
+            trend_factor = max(trend_factor, 0.0)
         else:
             low_corridor_rel = config.LOW_CORRIDOR_REL_OLD
             target_bucket = "old"
+            trend_factor = 1.0
 
-        price_threshold = base_price * (1.0 - low_corridor_rel)
+        price_threshold = base_price * trend_factor * (1.0 - low_corridor_rel)
 
         if s.price >= price_threshold:
             i += 1
@@ -443,6 +452,7 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
         return segments
 
     base_price = metrics["base_price"]
+    trend_rel_30 = metrics.get("trend_rel_30", 0.0)
     if base_price <= 0:
         return segments
 
@@ -461,11 +471,17 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
         if age_days <= config.DIP_RECENT_WINDOW_DAYS:
             low_corridor_rel = config.LOW_CORRIDOR_REL_RECENT
             target_bucket = "recent"
+
+            trend_factor = 1.0 + min(trend_rel_30, 0.0) * (
+                config.DIP_RECENT_WINDOW_DAYS / 30.0
+            )
+            trend_factor = max(trend_factor, 0.0)
         else:
             low_corridor_rel = config.LOW_CORRIDOR_REL_OLD
             target_bucket = "old"
+            trend_factor = 1.0
 
-        price_threshold = base_price * (1.0 - low_corridor_rel)
+        price_threshold = base_price * trend_factor * (1.0 - low_corridor_rel)
 
         if s.price >= price_threshold:
             i += 1
