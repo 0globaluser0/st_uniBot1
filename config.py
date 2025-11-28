@@ -117,6 +117,9 @@ REC_PRICE_LOWER_Q_VOLATILE = 0.35
 REC_PRICE_SUPPORT_STEP_HOURS = 12.0
 REC_PRICE_SUPPORT_WINDOW_HOURS = 12.0
 REC_PRICE_SUPPORT_MIN_SHARE = 0.3
+# Минимальный суммарный объём продаж в окне, чтобы проверка считалась значимой
+# и единичные сделки не занижали rec_price.
+REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME = 5
 
 # ------------ Волновые графики (wave) ------------
 
