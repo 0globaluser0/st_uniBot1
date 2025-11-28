@@ -8,7 +8,7 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import unquote
 
 import requests
@@ -502,14 +502,14 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
 
 # ---------- Рекомендованная цена ----------
 
-def compute_rec_price_default(sales: List[Sale]) -> float:
+def compute_rec_price_default(sales: List[Sale], q: float) -> Tuple[float, List[Sale]]:
     """
     Базовая рек. цена:
       - последние RECENT_DAYS_FOR_REC_PRICE дней,
-      - взвешенный квантиль REC_PRICE_LOWER_Q.
+      - взвешенный квантиль q (зависит от стабильности предмета).
     """
     if not sales:
-        return 0.0
+        return 0.0, []
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
     last_dt = sales_sorted[-1].dt
@@ -522,26 +522,32 @@ def compute_rec_price_default(sales: List[Sale]) -> float:
     prices = [s.price for s in recent]
     weights = [s.amount for s in recent]
 
-    return weighted_quantile(prices, weights, config.REC_PRICE_LOWER_Q)
+    return weighted_quantile(prices, weights, q), recent
 
 
-def compute_rec_price_downtrend(sales: List[Sale], metrics: Dict[str, float]) -> float:
+def compute_rec_price_downtrend(
+    sales: List[Sale], metrics: Dict[str, float]
+) -> Tuple[float, List[Sale]]:
     """
     Для стабильного нисходящего тренда:
       - берём базовую rec_price (как в default) по последним N дням,
       - умножаем на фактор падения согласно trend_rel_30 * (FORECAST_HORIZON_DAYS/30).
     """
-    base_rec = compute_rec_price_default(sales)
+    base_rec, base_sales = compute_rec_price_default(
+        sales, config.REC_PRICE_LOWER_Q_STABLE
+    )
     trend_rel_30 = metrics["trend_rel_30"]  # отрицательный
 
     factor = 1.0 + trend_rel_30 * (config.FORECAST_HORIZON_DAYS / 30.0)
     if factor < 0.0:
         factor = 0.0
 
-    return base_rec * factor
+    return base_rec * factor, base_sales
 
 
-def compute_rec_price_wave(sales: List[Sale], metrics: Dict[str, float]) -> float:
+def compute_rec_price_wave(
+    sales: List[Sale], metrics: Dict[str, float]
+) -> Tuple[float, List[Sale]]:
     """
     Для волновых графиков:
       - берём только точки из валидных провалов (dips),
@@ -550,7 +556,9 @@ def compute_rec_price_wave(sales: List[Sale], metrics: Dict[str, float]) -> floa
     """
     segments = find_valid_dip_segments(sales, metrics)
     if not segments:
-        return compute_rec_price_default(sales)
+        return compute_rec_price_default(
+            sales, config.REC_PRICE_LOWER_Q_VOLATILE
+        )
 
     dip_sales: List[Sale] = []
     for seg in segments:
@@ -559,7 +567,61 @@ def compute_rec_price_wave(sales: List[Sale], metrics: Dict[str, float]) -> floa
     prices = [s.price for s in dip_sales]
     weights = [s.amount for s in dip_sales]
 
-    return weighted_quantile(prices, weights, config.REC_WAVE_Q)
+    return weighted_quantile(prices, weights, config.REC_WAVE_Q), dip_sales
+
+
+def enforce_rec_price_sales_support(
+    rec_price: float, rec_sales: List[Sale]
+) -> float:
+    """
+    Проверяет, что в последней половине диапазона, использованного для расчёта rec_price,
+    каждые REC_PRICE_SUPPORT_STEP_HOURS внутри окна REC_PRICE_SUPPORT_WINDOW_HOURS
+    есть достаточный объём продаж на цене >= rec_price. При нехватке продаж rec_price
+    опускается до максимального уровня, при котором условие выполняется во всех окнах.
+    """
+    if rec_price <= 0 or not rec_sales:
+        return rec_price
+
+    sales_sorted = sorted(rec_sales, key=lambda s: s.dt)
+    window_start = sales_sorted[0].dt
+    window_end = sales_sorted[-1].dt
+
+    if window_start >= window_end:
+        return rec_price
+
+    half_start = window_start + (window_end - window_start) / 2
+    relevant_sales = [s for s in sales_sorted if s.dt >= half_start]
+
+    if not relevant_sales:
+        return rec_price
+
+    step = timedelta(hours=config.REC_PRICE_SUPPORT_STEP_HOURS)
+    window = timedelta(hours=config.REC_PRICE_SUPPORT_WINDOW_HOURS)
+    min_share = config.REC_PRICE_SUPPORT_MIN_SHARE
+
+    adjusted_price = rec_price
+    t = half_start
+    while t <= window_end:
+        window_end_ts = min(t + window, window_end)
+        window_sales = [s for s in relevant_sales if t <= s.dt <= window_end_ts]
+        total_vol = sum(s.amount for s in window_sales)
+
+        if total_vol <= 0:
+            adjusted_price = min(adjusted_price, 0.0)
+        else:
+            required_vol = total_vol * min_share
+            acc = 0
+            candidate_price = 0.0
+            for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
+                acc += sale.amount
+                candidate_price = sale.price
+                if acc >= required_vol:
+                    break
+            adjusted_price = min(adjusted_price, candidate_price)
+
+        t += step
+
+    return adjusted_price
 
 
 # ---------- Прочие вычисления ----------
@@ -687,9 +749,14 @@ def classify_shape_basic(
 
     # 1) Жёсткие отсечки по провалам
     if old_dips > config.DIP_MAX_OLD_DAYS:
+        rec_price, rec_sales = compute_rec_price_wave(sales, metrics)
         return {
-            "status": "blacklist",
-            "reason": f"too_many_old_dips ({old_dips:.2f} days)",
+            "status": "ok",
+            "graph_type": "volatile",
+            "tier": 4,
+            "rec_price": rec_price,
+            "rec_price_sales": rec_sales,
+            "reason": f"old_dips_excess ({old_dips:.2f} days); dip-based rec_price",
         }
 
     if recent_dips > config.DIP_MAX_RECENT_DAYS:
@@ -710,34 +777,41 @@ def classify_shape_basic(
 
     # 3) stable_flat (tier 1): тренд -5..+5%, форма графика спокойная
     if abs(trend) <= config.TREND_REL_FLAT_MAX and shape_ok:
-        rec_price = compute_rec_price_default(sales)
+        rec_price, rec_price_sales = compute_rec_price_default(
+            sales, config.REC_PRICE_LOWER_Q_STABLE
+        )
         return {
             "status": "ok",
             "graph_type": "stable_flat",
             "tier": 1,
             "rec_price": rec_price,
+            "rec_price_sales": rec_price_sales,
             "reason": f"stable_flat; trend={trend*100:.1f}%, cv={cv:.3f}, wave_amp={wave_amp:.3f}",
         }
 
     # 4) stable_up (tier 2): тренд вверх, не слишком резкий, форма спокойная
     if trend > config.TREND_REL_FLAT_MAX and trend <= config.MAX_UP_TREND_REL and shape_ok:
-        rec_price = compute_rec_price_default(sales)
+        rec_price, rec_price_sales = compute_rec_price_default(
+            sales, config.REC_PRICE_LOWER_Q_STABLE
+        )
         return {
             "status": "ok",
             "graph_type": "stable_up",
             "tier": 2,
             "rec_price": rec_price,
+            "rec_price_sales": rec_price_sales,
             "reason": f"stable_up; trend={trend*100:.1f}%, cv={cv:.3f}, wave_amp={wave_amp:.3f}",
         }
 
     # 5) stable_down (tier 3): тренд вниз, умеренный, форма спокойная
     if trend < -config.TREND_REL_FLAT_MAX and trend >= config.MAX_DOWN_TREND_REL and shape_ok:
-        rec_price = compute_rec_price_downtrend(sales, metrics)
+        rec_price, rec_price_sales = compute_rec_price_downtrend(sales, metrics)
         return {
             "status": "ok",
             "graph_type": "stable_down",
             "tier": 3,
             "rec_price": rec_price,
+            "rec_price_sales": rec_price_sales,
             "reason": f"stable_down; trend={trend*100:.1f}%, cv={cv:.3f}, wave_amp={wave_amp:.3f}",
         }
 
@@ -747,23 +821,27 @@ def classify_shape_basic(
         and wave_amp >= config.WAVE_MIN_AMP
         and total_dip_days >= config.WAVE_MIN_DIP_DAYS
     ):
-        rec_price = compute_rec_price_wave(sales, metrics)
+        rec_price, rec_price_sales = compute_rec_price_wave(sales, metrics)
         return {
             "status": "ok",
             "graph_type": "wave",
             "tier": 4,
             "rec_price": rec_price,
+            "rec_price_sales": rec_price_sales,
             "reason": f"wave; trend={trend*100:.1f}%, cv={cv:.3f}, "
                       f"wave_amp={wave_amp:.3f}, dip_days={total_dip_days:.2f}",
         }
 
     # 7) всё остальное – нестабильные / сложные графики (tier 4)
-    rec_price = compute_rec_price_default(sales)
+    rec_price, rec_price_sales = compute_rec_price_default(
+        sales, config.REC_PRICE_LOWER_Q_VOLATILE
+    )
     return {
         "status": "ok",
         "graph_type": "volatile",
         "tier": 4,
         "rec_price": rec_price,
+        "rec_price_sales": rec_price_sales,
         "reason": f"volatile; trend={trend*100:.1f}%, cv={cv:.3f}, wave_amp={wave_amp:.3f}",
     }
 
@@ -814,11 +892,13 @@ def classify_shape_and_rec_price(
             }
 
         rec_price = base_res["rec_price"]
+        rec_price_sales = base_res.get("rec_price_sales", [])
         return {
             "status": "ok",
             "graph_type": "boost",
             "tier": 4,
             "rec_price": rec_price,
+            "rec_price_sales": rec_price_sales,
             "reason": (
                 f"boost_detected (ratio={ratio:.2f}); base_part={base_res['graph_type']}, "
                 f"base_reason={base_res['reason']}"
@@ -1413,6 +1493,14 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         }
 
     rec_price = float(shape_result["rec_price"])
+    rec_price_sales = shape_result.get("rec_price_sales", [])
+    adjusted_rec_price = enforce_rec_price_sales_support(rec_price, rec_price_sales)
+    if adjusted_rec_price != rec_price:
+        print(
+            f"[ADJUST] rec_price lowered from {rec_price:.4f} to {adjusted_rec_price:.4f} "
+            "to satisfy sales support."
+        )
+        rec_price = adjusted_rec_price
     tier = int(shape_result["tier"])
     graph_type = shape_result["graph_type"]
     reason = shape_result["reason"]
