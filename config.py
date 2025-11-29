@@ -59,7 +59,7 @@ MIN_TOTAL_AMOUNT_30D = 50
 # ------------ Разрывы между точками графика ------------
 
 # Максимально допустимый гэп между соседними точками (в часах)
-MAX_GAP_BETWEEN_POINTS_HOURS = 48.0
+MAX_GAP_BETWEEN_POINTS_HOURS = 6.0
 
 # Сколько последних дней учитывать при проверке гэпа между точками
 GAP_FILTER_WINDOW_DAYS = 27
@@ -154,7 +154,7 @@ BOOST_RECENT_DAYS = 7.0
 BOOST_MIN_RATIO = 1.30  # рост на 30% и более
 
 # Условие краша: base_recent <= base_old * CRASH_MIN_RATIO
-CRASH_MIN_RATIO = 0.65  # падение на 25% и более
+CRASH_MIN_RATIO = 0.75  # падение на 25% и более
 
 # Минимальный объём в старой и новой части для надёжного детекта
 BOOST_MIN_OLD_VOLUME = 50
