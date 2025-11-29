@@ -277,9 +277,30 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
       - mean_price: взвешенное среднее
       - std_price, cv_price
       - p10, p20, p40, p60, p80 (взвешенные)
-      - trend_rel_30: относительный тренд за 30 дней (доля, напр. -0.12 = -12%)
-      - slope_per_day: наклон линейной регрессии (в валюте/день)
+      - trend_rel_30: относительный тренд за 30 дней (взвешенный по объёму)
+      - trend_rel_30_unweighted: относительный тренд за 30 дней (без учёта объёма)
+      - slope_per_day: наклон линейной регрессии (в валюте/день, взвешенный)
+      - slope_per_day_unweighted: наклон линейной регрессии (в валюте/день, без веса)
     """
+
+    def _linear_regression_slope(
+        t_values: List[float], prices_values: List[float], weights_values: List[float]
+    ) -> float:
+        sum_w = sum(weights_values)
+        if sum_w <= 0:
+            return 0.0
+
+        sum_wt = sum(w * t for t, w in zip(t_values, weights_values))
+        sum_wp = sum(w * p for p, w in zip(prices_values, weights_values))
+        sum_wt2 = sum(w * (t ** 2) for t, w in zip(t_values, weights_values))
+        sum_wtp = sum(w * t * p for t, p, w in zip(t_values, prices_values, weights_values))
+
+        denom = (sum_w * sum_wt2 - sum_wt ** 2)
+        if abs(denom) < 1e-9:
+            return 0.0
+
+        return (sum_w * sum_wtp - sum_wt * sum_wp) / denom
+
     if not sales:
         return {
             "base_price": 0.0,
@@ -292,7 +313,9 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
             "p60": 0.0,
             "p80": 0.0,
             "trend_rel_30": 0.0,
+            "trend_rel_30_unweighted": 0.0,
             "slope_per_day": 0.0,
+            "slope_per_day_unweighted": 0.0,
         }
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
@@ -313,26 +336,17 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
     first_dt = sales_sorted[0].dt
     t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_sorted]
 
-    sum_w = sum(weights)
-    if sum_w <= 0:
-        slope = 0.0
-        trend_rel_30 = 0.0
+    slope = _linear_regression_slope(t_vals, prices, weights)
+    slope_unweighted = _linear_regression_slope(
+        t_vals, prices, [1.0 for _ in prices]
+    )
+
+    if base_price > 0:
+        trend_rel_30 = (slope * 30.0) / base_price
+        trend_rel_30_unweighted = (slope_unweighted * 30.0) / base_price
     else:
-        sum_wt = sum(w * t for t, w in zip(t_vals, weights))
-        sum_wp = sum(w * p for p, w in zip(prices, weights))
-        sum_wt2 = sum(w * (t ** 2) for t, w in zip(t_vals, weights))
-        sum_wtp = sum(w * t * p for t, p, w in zip(t_vals, prices, weights))
-
-        denom = (sum_w * sum_wt2 - sum_wt ** 2)
-        if abs(denom) < 1e-9:
-            slope = 0.0
-        else:
-            slope = (sum_w * sum_wtp - sum_wt * sum_wp) / denom
-
-        if base_price > 0:
-            trend_rel_30 = (slope * 30.0) / base_price
-        else:
-            trend_rel_30 = 0.0
+        trend_rel_30 = 0.0
+        trend_rel_30_unweighted = 0.0
 
     return {
         "base_price": base_price,
@@ -345,7 +359,9 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         "p60": p60,
         "p80": p80,
         "trend_rel_30": trend_rel_30,
+        "trend_rel_30_unweighted": trend_rel_30_unweighted,
         "slope_per_day": slope,
+        "slope_per_day_unweighted": slope_unweighted,
     }
 
 
@@ -1483,7 +1499,9 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     print(
         f"[ANALYSIS] {item_name}: base={metrics['base_price']:.4f}, "
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
-        f"cv={metrics['cv_price']:.3f}, trend_30={metrics['trend_rel_30']*100:.1f}%, "
+        f"cv={metrics['cv_price']:.3f}, "
+        f"trend_30_vol={metrics['trend_rel_30']*100:.1f}%, "
+        f"trend_30_pts={metrics['trend_rel_30_unweighted']*100:.1f}%, "
         f"p20={metrics['p20']:.4f}, p80={metrics['p80']:.4f}, "
         f"old_dips={dips['old_dips_days']:.2f}d, "
         f"recent_dips={dips['recent_dips_days']:.2f}d"
