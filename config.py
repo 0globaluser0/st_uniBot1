@@ -117,14 +117,27 @@ REC_PRICE_LOWER_Q_STABLE = 0.4
 REC_PRICE_LOWER_Q_VOLATILE = 0.35
 
 # Проверка достаточной поддержки продаж около рек. цены
-# На последней половине диапазона, использованного для расчёта рек. цены,
-# каждые REC_PRICE_SUPPORT_STEP_HOURS часов внутри окна REC_PRICE_SUPPORT_WINDOW_HOURS
-# должны быть продажи на цене >= rec_price в объёме не меньше
-# REC_PRICE_SUPPORT_MIN_SHARE доли от всего объёма окна. Иначе rec_price опускается
-# до максимального уровня, при котором условие выполняется во всех окнах.
-REC_PRICE_SUPPORT_STEP_HOURS = 12.0
-REC_PRICE_SUPPORT_WINDOW_HOURS = 12.0
-REC_PRICE_SUPPORT_MIN_SHARE = 0.3
+# На нескольких временных промежутках проверяется, что вокруг rec_price есть
+# достаточный объём продаж. Для каждого периода задаются:
+#   - HOURS: глубина в часах от последней продажи, в пределах которой строятся окна;
+#   - STEP_WINDOW_HOURS: единая величина для шага между окнами и их ширины;
+#   - MIN_SHARE: требуемая доля объёма продаж на цене >= rec_price внутри окна;
+#   - MAX_ALLOWED_VIOLATIONS: сколько окон в пределах периода могут нарушать условие,
+#     не требуя снижения rec_price.
+REC_PRICE_SUPPORT_PERIODS = [
+    {
+        "HOURS": 24.0,
+        "STEP_WINDOW_HOURS": 12.0,
+        "MIN_SHARE": 0.3,
+        "MAX_ALLOWED_VIOLATIONS": 0,
+    },
+    {
+        "HOURS": 168.0,
+        "STEP_WINDOW_HOURS": 12.0,
+        "MIN_SHARE": 0.3,
+        "MAX_ALLOWED_VIOLATIONS": 0,
+    },
+]
 # Минимальный суммарный объём продаж в окне, чтобы проверка считалась значимой
 # и единичные сделки не занижали rec_price.
 REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME = 5

@@ -298,10 +298,12 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
       - mean_price: взвешенное среднее
       - std_price, cv_price
       - p10, p20, p40, p60, p80 (взвешенные)
-      - trend_rel_30: относительный тренд за 30 дней (взвешенный по объёму)
-      - trend_rel_30_unweighted: относительный тренд за 30 дней (без учёта объёма)
-      - slope_per_day: наклон линейной регрессии (в валюте/день, взвешенный)
-      - slope_per_day_unweighted: наклон линейной регрессии (в валюте/день, без веса)
+      - trend_rel_30: относительный тренд за 30 дней (по точкам)
+      - trend_rel_30_unweighted: относительный тренд за 30 дней (синоним trend_rel_30)
+      - trend_rel_30_volume: относительный тренд за 30 дней (взвешенный по объёму)
+      - slope_per_day: наклон линейной регрессии (в валюте/день, по точкам)
+      - slope_per_day_unweighted: наклон линейной регрессии (синоним slope_per_day)
+      - slope_per_day_volume: наклон линейной регрессии (в валюте/день, взвешенный)
     """
 
     def _linear_regression_slope(
@@ -335,8 +337,10 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
             "p80": 0.0,
             "trend_rel_30": 0.0,
             "trend_rel_30_unweighted": 0.0,
+            "trend_rel_30_volume": 0.0,
             "slope_per_day": 0.0,
             "slope_per_day_unweighted": 0.0,
+            "slope_per_day_volume": 0.0,
         }
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
@@ -357,17 +361,15 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
     first_dt = sales_sorted[0].dt
     t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_sorted]
 
-    slope = _linear_regression_slope(t_vals, prices, weights)
-    slope_unweighted = _linear_regression_slope(
-        t_vals, prices, [1.0 for _ in prices]
-    )
+    slope_volume = _linear_regression_slope(t_vals, prices, weights)
+    slope_points = _linear_regression_slope(t_vals, prices, [1.0 for _ in prices])
 
     if base_price > 0:
-        trend_rel_30 = (slope * 30.0) / base_price
-        trend_rel_30_unweighted = (slope_unweighted * 30.0) / base_price
+        trend_rel_30_points = (slope_points * 30.0) / base_price
+        trend_rel_30_volume = (slope_volume * 30.0) / base_price
     else:
-        trend_rel_30 = 0.0
-        trend_rel_30_unweighted = 0.0
+        trend_rel_30_points = 0.0
+        trend_rel_30_volume = 0.0
 
     return {
         "base_price": base_price,
@@ -379,10 +381,12 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         "p40": p40,
         "p60": p60,
         "p80": p80,
-        "trend_rel_30": trend_rel_30,
-        "trend_rel_30_unweighted": trend_rel_30_unweighted,
-        "slope_per_day": slope,
-        "slope_per_day_unweighted": slope_unweighted,
+        "trend_rel_30": trend_rel_30_points,
+        "trend_rel_30_unweighted": trend_rel_30_points,
+        "trend_rel_30_volume": trend_rel_30_volume,
+        "slope_per_day": slope_points,
+        "slope_per_day_unweighted": slope_points,
+        "slope_per_day_volume": slope_volume,
     }
 
 
@@ -675,54 +679,74 @@ def enforce_rec_price_sales_support(
     rec_price: float, rec_sales: List[Sale]
 ) -> float:
     """
-    Проверяет, что в последней половине диапазона, использованного для расчёта rec_price,
-    каждые REC_PRICE_SUPPORT_STEP_HOURS внутри окна REC_PRICE_SUPPORT_WINDOW_HOURS
-    есть достаточный объём продаж на цене >= rec_price. При нехватке продаж rec_price
-    опускается до максимального уровня, при котором условие выполняется во всех окнах.
+    Проверяет поддержку rec_price на нескольких временных диапазонах. Для каждого
+    периода окна строятся с шагом STEP_WINDOW_HOURS (он же ширина окна) в пределах
+    последних HOURS часов (для второго периода – от HOURS второго до HOURS первого).
+    Если число нарушений превышает MAX_ALLOWED_VIOLATIONS, rec_price понижается
+    до уровня, удовлетворяющего всем оставшимся окнам.
     """
     if rec_price <= 0 or not rec_sales:
         return rec_price
 
     sales_sorted = sorted(rec_sales, key=lambda s: s.dt)
-    window_start = sales_sorted[0].dt
-    window_end = sales_sorted[-1].dt
+    overall_start = sales_sorted[0].dt
+    last_dt = sales_sorted[-1].dt
 
-    if window_start >= window_end:
+    if overall_start >= last_dt:
         return rec_price
 
-    half_start = window_start + (window_end - window_start) / 2
-    relevant_sales = [s for s in sales_sorted if s.dt >= half_start]
-
-    if not relevant_sales:
-        return rec_price
-
-    step = timedelta(hours=config.REC_PRICE_SUPPORT_STEP_HOURS)
-    window = timedelta(hours=config.REC_PRICE_SUPPORT_WINDOW_HOURS)
-    min_share = config.REC_PRICE_SUPPORT_MIN_SHARE
     min_window_volume = config.REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME
-
     adjusted_price = rec_price
-    t = half_start
-    while t <= window_end:
-        window_end_ts = min(t + window, window_end)
-        window_sales = [s for s in relevant_sales if t <= s.dt <= window_end_ts]
-        total_vol = sum(s.amount for s in window_sales)
+    period_end = last_dt
 
-        if total_vol < min_window_volume:
-            t += step
+    for period_cfg in config.REC_PRICE_SUPPORT_PERIODS:
+        hours_depth = timedelta(hours=period_cfg["HOURS"])
+        step_window = timedelta(hours=period_cfg["STEP_WINDOW_HOURS"])
+        min_share = period_cfg["MIN_SHARE"]
+        allowed_violations = period_cfg["MAX_ALLOWED_VIOLATIONS"]
+
+        period_start = max(overall_start, last_dt - hours_depth)
+        if period_end <= period_start:
+            period_end = period_start
             continue
 
-        required_vol = total_vol * min_share
-        acc = 0
-        candidate_price = 0.0
-        for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
-            acc += sale.amount
-            candidate_price = sale.price
-            if acc >= required_vol:
-                break
-        adjusted_price = min(adjusted_price, candidate_price)
+        period_sales = [
+            s for s in sales_sorted if period_start <= s.dt <= period_end
+        ]
+        if not period_sales:
+            period_end = period_start
+            continue
 
-        t += step
+        violating_candidates: List[float] = []
+        t = period_start
+        while t < period_end:
+            window_end_ts = min(t + step_window, period_end)
+            window_sales = [s for s in period_sales if t <= s.dt <= window_end_ts]
+            total_vol = sum(s.amount for s in window_sales)
+
+            if total_vol < min_window_volume:
+                t += step_window
+                continue
+
+            required_vol = total_vol * min_share
+            acc = 0
+            candidate_price = 0.0
+            for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
+                acc += sale.amount
+                candidate_price = sale.price
+                if acc >= required_vol:
+                    break
+
+            if candidate_price < adjusted_price:
+                violating_candidates.append(candidate_price)
+
+            t += step_window
+
+        if len(violating_candidates) > allowed_violations:
+            violating_candidates.sort()
+            adjusted_price = min(adjusted_price, violating_candidates[allowed_violations])
+
+        period_end = period_start
 
     return adjusted_price
 
@@ -1567,8 +1591,8 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         f"[ANALYSIS] {item_name}: base={metrics['base_price']:.4f}, "
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
         f"cv={metrics['cv_price']:.3f}, \n"
-        f"trend_30_vol={metrics['trend_rel_30']*100:.1f}%, "
-        f"trend_30_pts={metrics['trend_rel_30_unweighted']*100:.1f}%, "
+        f"trend_30_pts={metrics['trend_rel_30']*100:.1f}%, "
+        f"trend_30_vol={metrics['trend_rel_30_volume']*100:.1f}%, "
         f"p20={metrics['p20']:.4f}, p80={metrics['p80']:.4f}, "
         f"old_dips={dips['old_dips_days']:.2f}d, "
         f"recent_dips={dips['recent_dips_days']:.2f}d"
