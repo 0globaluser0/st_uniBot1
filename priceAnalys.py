@@ -208,6 +208,27 @@ def add_to_blacklist(item_name: str, reason: str) -> None:
     conn.close()
 
 
+def blacklist_with_html(item_name: str, reason: str, html: str) -> Dict[str, str]:
+    """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
+    print(f"[ANALYSIS] {item_name}: {reason}")
+    add_to_blacklist(item_name, reason)
+    html_path = os.path.join(
+        config.HTML_BLACKLIST_DIR,
+        f"{safe_filename(item_name)}.html",
+    )
+    try:
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+    except Exception:
+        pass
+
+    return {
+        "status": "blacklist",
+        "item_name": item_name,
+        "reason": reason,
+    }
+
+
 def get_blacklist_entry(item_name: str) -> Optional[sqlite3.Row]:
     conn = get_conn()
     cur = conn.cursor()
@@ -363,6 +384,32 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         "slope_per_day": slope,
         "slope_per_day_unweighted": slope_unweighted,
     }
+
+
+def max_gap_between_points_hours(sales: List[Sale], window_days: float) -> float:
+    """
+    Возвращает максимальный промежуток (в часах) между соседними точками продаж
+    за последние window_days дней.
+    """
+    if len(sales) < 2:
+        return 0.0
+
+    sales_sorted = sorted(sales, key=lambda s: s.dt)
+    cutoff_dt = sales_sorted[-1].dt - timedelta(days=window_days)
+    filtered_sales = [s for s in sales_sorted if s.dt >= cutoff_dt]
+
+    if len(filtered_sales) < 2:
+        return 0.0
+
+    max_gap = 0.0
+    prev_dt = filtered_sales[0].dt
+    for s in filtered_sales[1:]:
+        gap_hours = (s.dt - prev_dt).total_seconds() / 3600.0
+        if gap_hours > max_gap:
+            max_gap = gap_hours
+        prev_dt = s.dt
+
+    return max_gap
 
 
 # ---------- Просадки (dips) ----------
@@ -1498,22 +1545,20 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     total_amount_30d = sum(s.amount for s in sales)
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
-        print(f"[ANALYSIS] {item_name}: {reason}")
-        add_to_blacklist(item_name, reason)
-        html_path = os.path.join(
-            config.HTML_BLACKLIST_DIR,
-            f"{safe_filename(item_name)}.html",
+        return blacklist_with_html(item_name, reason, html)
+
+    # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
+    # чтобы предмет моментально отправлялся в блэклист без дальнейшего анализа.
+    max_gap_hours = max_gap_between_points_hours(
+        sales, config.GAP_FILTER_WINDOW_DAYS
+    )
+    if max_gap_hours > config.MAX_GAP_BETWEEN_POINTS_HOURS:
+        reason = (
+            "gap_between_points_too_big "
+            f"({max_gap_hours:.1f}h > {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h "
+            f"within {config.GAP_FILTER_WINDOW_DAYS}d)"
         )
-        try:
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(html)
-        except Exception:
-            pass
-        return {
-            "status": "blacklist",
-            "item_name": item_name,
-            "reason": reason,
-        }
+        return blacklist_with_html(item_name, reason, html)
 
     metrics = compute_basic_metrics(sales)
     dips = compute_price_dips(sales, metrics)
