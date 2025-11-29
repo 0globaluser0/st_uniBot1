@@ -704,6 +704,8 @@ def enforce_rec_price_sales_support(
         step_window = timedelta(hours=period_cfg["STEP_WINDOW_HOURS"])
         min_share = period_cfg["MIN_SHARE"]
         allowed_violations = period_cfg["MAX_ALLOWED_VIOLATIONS"]
+        period_rec_price = adjusted_price
+        period_violations: List[Dict[str, Any]] = []
 
         period_start = max(overall_start, last_dt - hours_depth)
         if period_end <= period_start:
@@ -737,10 +739,36 @@ def enforce_rec_price_sales_support(
                 if acc >= required_vol:
                     break
 
-            if candidate_price < adjusted_price:
+            if candidate_price < period_rec_price:
                 violating_candidates.append(candidate_price)
+                period_violations.append(
+                    {
+                        "start": t,
+                        "end": window_end_ts,
+                        "candidate_price": candidate_price,
+                        "total_vol": total_vol,
+                        "required_vol": required_vol,
+                        "min_share": min_share,
+                        "rec_price": period_rec_price,
+                    }
+                )
 
             t += step_window
+
+        if period_violations:
+            print(
+                "[REC_SUPPORT] Нарушения поддержки продаж: период последних "
+                f"{period_cfg['HOURS']}ч, rec_price={period_rec_price:.2f}, "
+                f"step={period_cfg['STEP_WINDOW_HOURS']}ч"
+            )
+            for v in period_violations:
+                print(
+                    "    окно "
+                    f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
+                    f"candidate_price={v['candidate_price']:.2f}, "
+                    f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
+                    f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
+                )
 
         if len(violating_candidates) > allowed_violations:
             violating_candidates.sort()
