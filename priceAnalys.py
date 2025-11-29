@@ -1521,7 +1521,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     print(
         f"[ANALYSIS] {item_name}: base={metrics['base_price']:.4f}, "
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
-        f"cv={metrics['cv_price']:.3f}, "
+        f"cv={metrics['cv_price']:.3f}, \n"
         f"trend_30_vol={metrics['trend_rel_30']*100:.1f}%, "
         f"trend_30_pts={metrics['trend_rel_30_unweighted']*100:.1f}%, "
         f"p20={metrics['p20']:.4f}, p80={metrics['p80']:.4f}, "
