@@ -383,11 +383,14 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
 
     base_price = metrics["base_price"]
     trend_rel_30 = metrics.get("trend_rel_30", 0.0)
+    slope_per_day = metrics.get("slope_per_day", 0.0)
     if base_price <= 0:
         return {"old_dips_days": 0.0, "recent_dips_days": 0.0}
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
+    first_dt = sales_sorted[0].dt
     last_dt = sales_sorted[-1].dt
+    last_t = (last_dt - first_dt).total_seconds() / 86400.0
 
     volumes = [s.amount for s in sales_sorted]
     medium_volume = sum(volumes) / len(volumes) if volumes else 0.0
@@ -418,7 +421,11 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
 
         price_threshold = base_price * trend_factor * (1.0 - low_corridor_rel)
 
-        if s.price >= price_threshold:
+        t_value = (s.dt - first_dt).total_seconds() / 86400.0
+        trend_adjustment = slope_per_day * (t_value - last_t)
+        price_with_trend = s.price - trend_adjustment
+
+        if price_with_trend >= price_threshold:
             i += 1
             continue
 
@@ -432,7 +439,11 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
             age_days_j = (last_dt - s_j.dt).total_seconds() / 86400.0
             if (age_days_j <= config.DIP_RECENT_WINDOW_DAYS and target_bucket == "recent") or \
                (age_days_j > config.DIP_RECENT_WINDOW_DAYS and target_bucket == "old"):
-                if s_j.price < price_threshold:
+                t_value_j = (s_j.dt - first_dt).total_seconds() / 86400.0
+                trend_adjustment_j = slope_per_day * (t_value_j - last_t)
+                price_with_trend_j = s_j.price - trend_adjustment_j
+
+                if price_with_trend_j < price_threshold:
                     dip_end_idx = j
                     dip_volume += s_j.amount
                     j += 1
@@ -469,11 +480,14 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
 
     base_price = metrics["base_price"]
     trend_rel_30 = metrics.get("trend_rel_30", 0.0)
+    slope_per_day = metrics.get("slope_per_day", 0.0)
     if base_price <= 0:
         return segments
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
+    first_dt = sales_sorted[0].dt
     last_dt = sales_sorted[-1].dt
+    last_t = (last_dt - first_dt).total_seconds() / 86400.0
 
     volumes = [s.amount for s in sales_sorted]
     medium_volume = sum(volumes) / len(volumes) if volumes else 0.0
@@ -499,7 +513,11 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
 
         price_threshold = base_price * trend_factor * (1.0 - low_corridor_rel)
 
-        if s.price >= price_threshold:
+        t_value = (s.dt - first_dt).total_seconds() / 86400.0
+        trend_adjustment = slope_per_day * (t_value - last_t)
+        price_with_trend = s.price - trend_adjustment
+
+        if price_with_trend >= price_threshold:
             i += 1
             continue
 
@@ -513,7 +531,11 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
             age_days_j = (last_dt - s_j.dt).total_seconds() / 86400.0
             if (age_days_j <= config.DIP_RECENT_WINDOW_DAYS and target_bucket == "recent") or \
                (age_days_j > config.DIP_RECENT_WINDOW_DAYS and target_bucket == "old"):
-                if s_j.price < price_threshold:
+                t_value_j = (s_j.dt - first_dt).total_seconds() / 86400.0
+                trend_adjustment_j = slope_per_day * (t_value_j - last_t)
+                price_with_trend_j = s_j.price - trend_adjustment_j
+
+                if price_with_trend_j < price_threshold:
                     dip_end_idx = j
                     dip_volume += s_j.amount
                     j += 1
