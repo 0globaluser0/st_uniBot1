@@ -731,6 +731,9 @@ def enforce_rec_price_sales_support(
                 continue
 
             required_vol = total_vol * min_share
+            support_vol = sum(
+                s.amount for s in window_sales if s.price >= period_rec_price
+            )
             acc = 0
             candidate_price = 0.0
             for sale in sorted(window_sales, key=lambda s: s.price, reverse=True):
@@ -748,6 +751,7 @@ def enforce_rec_price_sales_support(
                         "candidate_price": candidate_price,
                         "total_vol": total_vol,
                         "required_vol": required_vol,
+                        "support_vol": support_vol,
                         "min_share": min_share,
                         "rec_price": period_rec_price,
                     }
@@ -767,6 +771,7 @@ def enforce_rec_price_sales_support(
                     f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
                     f"candidate_price={v['candidate_price']:.2f}, "
                     f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
+                    f"(объём>=rec_price: {v['support_vol']:.2f}) "
                     f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
                 )
 
