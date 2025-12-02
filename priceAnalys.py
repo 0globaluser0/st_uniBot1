@@ -501,8 +501,9 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
             return True
         if not is_downtrend:
             return True
-        # Первые ~15 дней от последней продажи без поправки на тренд
-        return age_days_val > 15.0
+        # При нисходящем тренде учитываем поправку для старых точек только
+        # в первые ~15 дней от последней продажи
+        return age_days_val <= 15.0
 
     n = len(sales_sorted)
     i = 0
