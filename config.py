@@ -3,6 +3,9 @@
 # ------------ General paths ------------
 DB_PATH = "steam_analyser.db"
 
+# Отдельная база для блэклиста
+BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
+
 PROXIES_FILE = "proxies.txt"
 
 HTML_APPROVE_DIR = "HTML_steam_approve"
@@ -130,16 +133,18 @@ REC_PRICE_SUPPORT_PERIODS = [
         "STEP_WINDOW_HOURS": 12.0,
         "MIN_SHARE": 0.3,
         "MAX_ALLOWED_VIOLATIONS": 0,
+        "MIN_WINDOW_VOLUME": 5,
     },
     {
         "HOURS": 168.0,
         "STEP_WINDOW_HOURS": 12.0,
         "MIN_SHARE": 0.3,
         "MAX_ALLOWED_VIOLATIONS": 0,
+        "MIN_WINDOW_VOLUME": 8,
     },
 ]
 # Минимальный суммарный объём продаж в окне, чтобы проверка считалась значимой
-# и единичные сделки не занижали rec_price.
+# и единичные сделки не занижали rec_price (используется как fallback).
 REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME = 5
 
 # ------------ Волновые графики (wave) ------------
@@ -152,6 +157,9 @@ WAVE_MIN_DIP_DAYS = 0.3  # ~ 7 часов
 
 # Квантиль для rec_price по дипам (volume-weighted)
 REC_WAVE_Q = 0.35
+
+# Медианная цена для recent dips считается по последним N дням
+RECENT_DIP_MEDIAN_DAYS = 3.0
 
 # ------------ Нисходящий тренд: прогноз ------------
 
