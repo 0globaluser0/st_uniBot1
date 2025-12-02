@@ -165,6 +165,8 @@ RECENT_DIP_MEDIAN_DAYS = 3.0
 
 # Горизонт прогноза в днях (между 7 и 14, ты предлагал 10)
 FORECAST_HORIZON_DAYS = 11.0
+# Окно точек (в днях) для расчёта тренда при прогнозировании нисходящего графика
+FORECAST_TREND_WINDOW_DAYS = 10.0
 
 # ------------ Boost / Crash detection ------------
 
