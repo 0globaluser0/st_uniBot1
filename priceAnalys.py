@@ -753,7 +753,7 @@ def compute_stable_like_rec_price(
         sales, config.REC_PRICE_LOWER_Q_STABLE
     )
     trend = metrics.get("trend_rel_30", 0.0)
-    forecast_trend = metrics.get("trend_rel_30_down_forecast", trend)
+    forecast_trend = trend
     trend_factor = 1.0
 
     if trend < -config.TREND_REL_FLAT_MAX:
