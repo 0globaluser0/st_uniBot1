@@ -1241,31 +1241,47 @@ def classify_shape_basic(
             sales, metrics
         )
 
-        dip_final_price = dip_rec_price
-        stable_final_price = stable_rec_price * stable_trend_factor
+        dip_supported_price = enforce_rec_price_sales_support(
+            dip_rec_price,
+            dip_sales,
+            dip_based=True,
+            latest_dip_dt=latest_dip_dt,
+        )
+        stable_supported_price = enforce_rec_price_sales_support(
+            stable_rec_price,
+            stable_sales,
+        )
 
-        use_dip_price = dip_final_price <= stable_final_price
-        chosen_price = dip_rec_price if use_dip_price else stable_rec_price
+        use_dip_price = dip_supported_price <= stable_supported_price
+        chosen_supported_price = (
+            dip_supported_price if use_dip_price else stable_supported_price
+        )
         chosen_sales = dip_sales if use_dip_price else stable_sales
+        chosen_support_sales = dip_sales if use_dip_price else stable_sales
         post_trend_factor = 1.0 if use_dip_price else stable_trend_factor
+        final_rec_price = chosen_supported_price * post_trend_factor
 
         print(
-            f"[REC_PRICE] old_dip_dips: dip_based={dip_final_price:.4f}, "
-            f"stable_like={stable_final_price:.4f}, chosen={'dip' if use_dip_price else 'stable'}"
+            f"[REC_PRICE] old_dip_dips: dip_supported={dip_supported_price:.4f}, "
+            f"stable_supported={stable_supported_price:.4f}, "
+            f"chosen={'dip' if use_dip_price else 'stable'}, "
+            f"post_trend_factor={post_trend_factor:.4f}, final_rec_price={final_rec_price:.4f}"
         )
 
         return _ok_result(
             graph_type="old_dip_dips",
             tier=5,
-            rec_price=chosen_price,
+            rec_price=final_rec_price,
             rec_price_sales=chosen_sales,
-            rec_price_support_sales=sales if use_dip_price else stable_sales,
+            rec_price_support_sales=chosen_support_sales,
             rec_price_from_dip=use_dip_price,
             latest_dip_dt=latest_dip_dt,
             post_support_trend_factor=post_trend_factor,
             reason=(
-                f"old_dips_excess ({old_dips:.2f} days); dip_rec={dip_final_price:.4f}; "
-                f"stable_like={stable_final_price:.4f}; chosen={'dip' if use_dip_price else 'stable'}; {wave_info}"
+                f"old_dips_excess ({old_dips:.2f} days); dip_supported={dip_supported_price:.4f}; "
+                f"stable_supported={stable_supported_price:.4f}; "
+                f"chosen={'dip' if use_dip_price else 'stable'}; "
+                f"post_trend_factor={post_trend_factor:.3f}; {wave_info}"
             ),
         )
 
