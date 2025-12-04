@@ -1548,12 +1548,20 @@ def dump_sales_debug(item_name: str, sales: List[Sale]) -> None:
     with open(fn, "w", encoding="utf-8") as f:
         metrics = compute_basic_metrics(sales)
         histogram = compute_old_dip_histogram(sales, metrics)
+        last_dt = max(sales, key=lambda s: s.dt).dt
+
+        bin_size_days = 3.0
 
         f.write("old_dip_histogram (days_from_last_sale; bin=3d)\n")
         for idx, days in enumerate(histogram):
-            left = idx * 3
-            right = left + 3
-            f.write(f"{left:02d}-{right:02d}d\t{days:.3f}\n")
+            left = idx * bin_size_days
+            right = left + bin_size_days
+            bin_start_dt = last_dt - timedelta(days=right)
+            bin_end_dt = last_dt - timedelta(days=left)
+            f.write(
+                f"{left:02.0f}-{right:02.0f}d\t{days:.3f}\t"
+                f"{bin_start_dt:%Y-%m-%d %H:%M} -> {bin_end_dt:%Y-%m-%d %H:%M}\n"
+            )
         f.write("\n")
 
         f.write("price\tamount\ttime\tdate\n")
