@@ -633,6 +633,137 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
     return {"old_dips_days": old_dips_days, "recent_dips_days": recent_dips_days}
 
 
+def compute_old_dip_histogram(
+    sales: List[Sale], metrics: Dict[str, float], *, bins_count: int = 10, bin_size_days: float = 3.0
+) -> List[float]:
+    """
+    Строит гистограмму длительностей old_dip-провалов по диапазонам времени от последней продажи.
+
+    - bins_count: количество диапазонов (по умолчанию 10)
+    - bin_size_days: ширина диапазона в днях (по умолчанию 3 дня → покрываем ~30 дней)
+    """
+
+    if not sales or bins_count <= 0 or bin_size_days <= 0:
+        return [0.0 for _ in range(max(bins_count, 0))]
+
+    base_price = metrics["base_price"]
+    trend_rel_30 = metrics.get("trend_rel_30", 0.0)
+    slope_per_day = metrics.get("slope_per_day", 0.0)
+    if base_price <= 0:
+        return [0.0 for _ in range(bins_count)]
+
+    sales_sorted = sorted(sales, key=lambda s: s.dt)
+    first_dt = sales_sorted[0].dt
+    last_dt = sales_sorted[-1].dt
+    last_t = (last_dt - first_dt).total_seconds() / 86400.0
+
+    recent_median_price = base_price
+    cutoff_recent_median = last_dt - timedelta(days=config.RECENT_DIP_MEDIAN_DAYS)
+    recent_prices = [s.price for s in sales_sorted if s.dt >= cutoff_recent_median]
+    recent_weights = [s.amount for s in sales_sorted if s.dt >= cutoff_recent_median]
+    if recent_prices and recent_weights:
+        recent_median_price = weighted_quantile(recent_prices, recent_weights, 0.5)
+
+    volumes = [s.amount for s in sales_sorted]
+    medium_volume = sum(volumes) / len(volumes) if volumes else 0.0
+
+    histogram = [0.0 for _ in range(bins_count)]
+    max_age = bins_count * bin_size_days
+
+    is_downtrend = trend_rel_30 < -config.TREND_REL_FLAT_MAX
+
+    def _should_apply_trend_adj(bucket: str, age_days_val: float) -> bool:
+        if bucket != "old":
+            return True
+        if not is_downtrend:
+            return True
+        return age_days_val <= 15.0
+
+    n = len(sales_sorted)
+    i = 0
+    while i < n:
+        s = sales_sorted[i]
+        age_days = (last_dt - s.dt).total_seconds() / 86400.0
+
+        if age_days <= config.DIP_RECENT_WINDOW_DAYS:
+            low_corridor_rel = config.LOW_CORRIDOR_REL_RECENT
+            target_bucket = "recent"
+            bucket_base_price = (
+                recent_median_price if recent_median_price > 0 else base_price
+            )
+            trend_factor = 1.0 + min(trend_rel_30, 0.0) * (
+                config.DIP_RECENT_WINDOW_DAYS / 30.0
+            )
+            trend_factor = max(trend_factor, 0.0)
+        else:
+            low_corridor_rel = config.LOW_CORRIDOR_REL_OLD
+            target_bucket = "old"
+            trend_factor = 1.0
+            bucket_base_price = base_price
+
+        price_threshold = bucket_base_price * trend_factor * (1.0 - low_corridor_rel)
+
+        t_value = (s.dt - first_dt).total_seconds() / 86400.0
+        trend_adjustment = (
+            slope_per_day * (t_value - last_t)
+            if _should_apply_trend_adj(target_bucket, age_days)
+            else 0.0
+        )
+        price_with_trend = s.price - trend_adjustment
+
+        if price_with_trend >= price_threshold:
+            i += 1
+            continue
+
+        dip_start_idx = i
+        dip_end_idx = i
+        dip_volume = s.amount
+
+        j = i + 1
+        while j < n:
+            s_j = sales_sorted[j]
+            age_days_j = (last_dt - s_j.dt).total_seconds() / 86400.0
+            if (age_days_j <= config.DIP_RECENT_WINDOW_DAYS and target_bucket == "recent") or (
+                age_days_j > config.DIP_RECENT_WINDOW_DAYS and target_bucket == "old"
+            ):
+                t_value_j = (s_j.dt - first_dt).total_seconds() / 86400.0
+                trend_adjustment_j = (
+                    slope_per_day * (t_value_j - last_t)
+                    if _should_apply_trend_adj(target_bucket, age_days_j)
+                    else 0.0
+                )
+                price_with_trend_j = s_j.price - trend_adjustment_j
+
+                if price_with_trend_j < price_threshold:
+                    dip_end_idx = j
+                    dip_volume += s_j.amount
+                    j += 1
+                    continue
+            break
+
+        num_points = dip_end_idx - dip_start_idx + 1
+
+        if num_points >= config.DIP_MIN_POINTS and medium_volume > 0:
+            required_volume = medium_volume * num_points * config.DIP_VOLUME_FACTOR
+            if dip_volume >= required_volume:
+                dt_start = sales_sorted[dip_start_idx].dt
+                dt_end = sales_sorted[dip_end_idx].dt
+                if target_bucket == "old":
+                    age_start = (last_dt - dt_end).total_seconds() / 86400.0
+                    age_end = (last_dt - dt_start).total_seconds() / 86400.0
+                    if age_start < max_age and age_end > 0:
+                        for bin_idx in range(bins_count):
+                            bin_left = bin_idx * bin_size_days
+                            bin_right = bin_left + bin_size_days
+                            overlap = max(0.0, min(age_end, bin_right) - max(age_start, bin_left))
+                            if overlap > 0:
+                                histogram[bin_idx] += overlap
+
+        i = dip_end_idx + 1
+
+    return histogram
+
+
 def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> List[List[Sale]]:
     """
     Находит валидные сегменты провалов (список списков Sale),
@@ -1415,6 +1546,19 @@ def dump_sales_debug(item_name: str, sales: List[Sale]) -> None:
     """
     fn = os.path.join(config.SELL_PARSING_DIR, f"{safe_filename(item_name)}.txt")
     with open(fn, "w", encoding="utf-8") as f:
+        metrics = compute_basic_metrics(sales)
+        histogram = compute_old_dip_histogram(sales, metrics)
+        last_dt = sales[-1].dt if sales else datetime.utcnow()
+
+        f.write("old_dip_histogram (days_from_last_sale; bin=3d)\n")
+        for idx, days in enumerate(histogram):
+            left = idx * 3
+            right = left + 3
+            bin_from_dt = (last_dt - timedelta(days=right)).strftime("%Y-%m-%d")
+            bin_to_dt = (last_dt - timedelta(days=left)).strftime("%Y-%m-%d")
+            f.write(f"{left:02d}-{right:02d}d [{bin_from_dt}..{bin_to_dt}]\t{days:.3f}\n")
+        f.write("\n")
+
         f.write("price\tamount\ttime\tdate\n")
         for s in sales:
             f.write(
