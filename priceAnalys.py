@@ -424,6 +424,15 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         config.FORECAST_TREND_WINDOW_DAYS
     )
 
+    # Для прогноза в нисходящем тренде используем более осторожный тренд –
+    # минимальный по модулю из основного 30-дневного и свежего (последние X дней).
+    if abs(trend_rel_30_points) <= abs(trend_rel_30_recent):
+        trend_rel_forecast = trend_rel_30_points
+        slope_forecast = slope_points
+    else:
+        trend_rel_forecast = trend_rel_30_recent
+        slope_forecast = slope_points_recent
+
     residuals = [
         price - (slope_points * t + intercept_points)
         for price, t in zip(prices, t_vals)
@@ -451,11 +460,11 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         "trend_rel_30": trend_rel_30_points,
         "trend_rel_30_unweighted": trend_rel_30_points,
         "trend_rel_30_volume": trend_rel_30_volume,
-        "trend_rel_30_down_forecast": trend_rel_30_recent,
+        "trend_rel_30_down_forecast": trend_rel_forecast,
         "slope_per_day": slope_points,
         "slope_per_day_unweighted": slope_points,
         "slope_per_day_volume": slope_volume,
-        "slope_per_day_down_forecast": slope_points_recent,
+        "slope_per_day_down_forecast": slope_forecast,
         "intercept_price": intercept_points,
         "intercept_price_volume": intercept_volume,
     }
