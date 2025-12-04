@@ -576,7 +576,10 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
             trend_factor = 1.0
             bucket_base_price = base_price
 
-        price_threshold = bucket_base_price * trend_factor * (1.0 - low_corridor_rel)
+        price_threshold_with_trend = (
+            bucket_base_price * trend_factor * (1.0 - low_corridor_rel)
+        )
+        price_threshold_no_trend = bucket_base_price * (1.0 - low_corridor_rel)
 
         t_value = (s.dt - first_dt).total_seconds() / 86400.0
         trend_adjustment = (
@@ -585,8 +588,12 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
             else 0.0
         )
         price_with_trend = s.price - trend_adjustment
+        price_no_trend = s.price
 
-        if price_with_trend >= price_threshold:
+        if not (
+            price_with_trend < price_threshold_with_trend
+            and price_no_trend < price_threshold_no_trend
+        ):
             i += 1
             continue
 
@@ -607,8 +614,12 @@ def compute_price_dips(sales: List[Sale], metrics: Dict[str, float]) -> Dict[str
                     else 0.0
                 )
                 price_with_trend_j = s_j.price - trend_adjustment_j
+                price_no_trend_j = s_j.price
 
-                if price_with_trend_j < price_threshold:
+                if (
+                    price_with_trend_j < price_threshold_with_trend
+                    and price_no_trend_j < price_threshold_no_trend
+                ):
                     dip_end_idx = j
                     dip_volume += s_j.amount
                     j += 1
@@ -701,7 +712,10 @@ def compute_old_dip_histogram(
             trend_factor = 1.0
             bucket_base_price = base_price
 
-        price_threshold = bucket_base_price * trend_factor * (1.0 - low_corridor_rel)
+        price_threshold_with_trend = (
+            bucket_base_price * trend_factor * (1.0 - low_corridor_rel)
+        )
+        price_threshold_no_trend = bucket_base_price * (1.0 - low_corridor_rel)
 
         t_value = (s.dt - first_dt).total_seconds() / 86400.0
         trend_adjustment = (
@@ -710,8 +724,12 @@ def compute_old_dip_histogram(
             else 0.0
         )
         price_with_trend = s.price - trend_adjustment
+        price_no_trend = s.price
 
-        if price_with_trend >= price_threshold:
+        if not (
+            price_with_trend < price_threshold_with_trend
+            and price_no_trend < price_threshold_no_trend
+        ):
             i += 1
             continue
 
@@ -733,8 +751,12 @@ def compute_old_dip_histogram(
                     else 0.0
                 )
                 price_with_trend_j = s_j.price - trend_adjustment_j
+                price_no_trend_j = s_j.price
 
-                if price_with_trend_j < price_threshold:
+                if (
+                    price_with_trend_j < price_threshold_with_trend
+                    and price_no_trend_j < price_threshold_no_trend
+                ):
                     dip_end_idx = j
                     dip_volume += s_j.amount
                     j += 1
@@ -788,6 +810,15 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
     volumes = [s.amount for s in sales_sorted]
     medium_volume = sum(volumes) / len(volumes) if volumes else 0.0
 
+    is_downtrend = trend_rel_30 < -config.TREND_REL_FLAT_MAX
+
+    def _should_apply_trend_adj(bucket: str, age_days_val: float) -> bool:
+        if bucket != "old":
+            return True
+        if not is_downtrend:
+            return True
+        return age_days_val <= 15.0
+
     n = len(sales_sorted)
     i = 0
     while i < n:
@@ -807,13 +838,24 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
             target_bucket = "old"
             trend_factor = 1.0
 
-        price_threshold = base_price * trend_factor * (1.0 - low_corridor_rel)
+        price_threshold_with_trend = (
+            base_price * trend_factor * (1.0 - low_corridor_rel)
+        )
+        price_threshold_no_trend = base_price * (1.0 - low_corridor_rel)
 
         t_value = (s.dt - first_dt).total_seconds() / 86400.0
-        trend_adjustment = slope_per_day * (t_value - last_t)
+        trend_adjustment = (
+            slope_per_day * (t_value - last_t)
+            if _should_apply_trend_adj(target_bucket, age_days)
+            else 0.0
+        )
         price_with_trend = s.price - trend_adjustment
+        price_no_trend = s.price
 
-        if price_with_trend >= price_threshold:
+        if not (
+            price_with_trend < price_threshold_with_trend
+            and price_no_trend < price_threshold_no_trend
+        ):
             i += 1
             continue
 
@@ -828,10 +870,18 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
             if (age_days_j <= config.DIP_RECENT_WINDOW_DAYS and target_bucket == "recent") or \
                (age_days_j > config.DIP_RECENT_WINDOW_DAYS and target_bucket == "old"):
                 t_value_j = (s_j.dt - first_dt).total_seconds() / 86400.0
-                trend_adjustment_j = slope_per_day * (t_value_j - last_t)
+                trend_adjustment_j = (
+                    slope_per_day * (t_value_j - last_t)
+                    if _should_apply_trend_adj(target_bucket, age_days_j)
+                    else 0.0
+                )
                 price_with_trend_j = s_j.price - trend_adjustment_j
+                price_no_trend_j = s_j.price
 
-                if price_with_trend_j < price_threshold:
+                if (
+                    price_with_trend_j < price_threshold_with_trend
+                    and price_no_trend_j < price_threshold_no_trend
+                ):
                     dip_end_idx = j
                     dip_volume += s_j.amount
                     j += 1
