@@ -994,47 +994,13 @@ def dump_sales_debug(item_name: str, sales: List[Sale]) -> None:
     Цена   кол-во   Время   Дата
     """
     fn = os.path.join(config.SELL_PARSING_DIR, f"{safe_filename(item_name)}.txt")
-    sales_sorted = sorted(sales, key=lambda s: s.dt)
-    ranges = build_three_day_ranges(sales_sorted)
     with open(fn, "w", encoding="utf-8") as f:
         f.write("price\tamount\ttime\tdate\n")
-        for s in sales_sorted:
+        for s in sales:
             f.write(
                 f"{s.price:.6f}\t{s.amount}\t"
                 f"{s.dt.strftime('%H:%M')}\t{s.dt.strftime('%Y-%m-%d')}\n"
             )
-
-        if ranges:
-            f.write("\n3-day ranges (UTC):\n")
-            for idx, (start_dt, end_dt) in enumerate(ranges, start=1):
-                f.write(
-                    f"{idx:02d}: {start_dt.strftime('%Y-%m-%d %H:%M')} — "
-                    f"{end_dt.strftime('%Y-%m-%d %H:%M')}\n"
-                )
-
-
-def build_three_day_ranges(sales: List[Sale]) -> List[Tuple[datetime, datetime]]:
-    """
-    Формирует список непрерывных 3-дневных диапазонов от самой ранней продажи
-    до самой поздней. Каждая пара содержит начало и конец диапазона в UTC.
-    """
-    if not sales:
-        return []
-
-    earliest = sales[0].dt
-    last = sales[-1].dt
-
-    ranges: List[Tuple[datetime, datetime]] = []
-    current_end = last
-
-    while True:
-        current_start = current_end - timedelta(days=3)
-        ranges.append((current_start, current_end))
-        if current_start <= earliest:
-            break
-        current_end = current_start
-
-    return list(reversed(ranges))
 
 
 # ---------- Работа с прокси и скачивание HTML ----------
