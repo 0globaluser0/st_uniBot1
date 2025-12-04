@@ -433,6 +433,12 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         trend_rel_forecast = trend_rel_30_recent
         slope_forecast = slope_points_recent
 
+    # Прогноз применяем только при нисходящем тренде: для нейтральных/положительных
+    # трендов не хотим повышать цену.
+    if trend_rel_forecast >= 0:
+        trend_rel_forecast = 0.0
+        slope_forecast = 0.0
+
     residuals = [
         price - (slope_points * t + intercept_points)
         for price, t in zip(prices, t_vals)
@@ -771,16 +777,22 @@ def compute_rec_price_downtrend(
     base_rec, base_sales = compute_rec_price_default(
         sales, config.REC_PRICE_LOWER_Q_STABLE
     )
-    trend_rel_30 = metrics.get("trend_rel_30_down_forecast", metrics["trend_rel_30"])  # отрицательный
+    trend_rel_30 = metrics.get(
+        "trend_rel_30_down_forecast", metrics["trend_rel_30"]
+    )
 
-    factor = 1.0 + trend_rel_30 * (config.FORECAST_HORIZON_DAYS / 30.0)
-    if factor < 0.0:
-        factor = 0.0
+    if trend_rel_30 >= 0:
+        return base_rec, base_sales
+
+    factor = trend_forecast_factor(trend_rel_30)
 
     return base_rec * factor, base_sales
 
 
 def trend_forecast_factor(trend_rel_30: float) -> float:
+    if trend_rel_30 >= 0:
+        return 1.0
+
     factor = 1.0 + trend_rel_30 * (config.FORECAST_HORIZON_DAYS / 30.0)
     return max(factor, 0.0)
 
@@ -1178,7 +1190,9 @@ def classify_shape_basic(
             sales, config.REC_PRICE_LOWER_Q_STABLE
         )
         trend_forecast = metrics.get("trend_rel_30_down_forecast", trend)
-        factor = trend_forecast_factor(trend_forecast)
+        factor = 1.0
+        if trend_forecast < 0:
+            factor = trend_forecast_factor(trend_forecast)
         return _ok_result(
             graph_type="stable_down",
             tier=3,
@@ -1241,11 +1255,13 @@ def classify_shape_basic(
     trend_factor = 1.0
     if trend > config.TREND_REL_FLAT_MAX:
         graph_type = "volatile_up_trend"
-        trend_factor = trend_forecast_factor(trend)
+        if trend < 0:
+            trend_factor = trend_forecast_factor(trend)
     elif trend < -config.TREND_REL_FLAT_MAX:
         graph_type = "volatile_down_trend"
         trend_forecast = metrics.get("trend_rel_30_down_forecast", trend)
-        trend_factor = trend_forecast_factor(trend_forecast)
+        if trend_forecast < 0:
+            trend_factor = trend_forecast_factor(trend_forecast)
 
     return _ok_result(
         graph_type=graph_type,
