@@ -1318,6 +1318,16 @@ def classify_shape_basic(
             f"post_trend_factor={post_trend_factor:.4f}, final_rec_price={final_rec_price:.4f}"
         )
 
+        if trend < config.MAX_DOWN_TREND_REL or trend > config.MAX_UP_TREND_REL:
+            return {
+                "status": "blacklist",
+                "reason": (
+                    "old_dip_dips_trend_out_of_range "
+                    f"({trend*100:.1f}% not in "
+                    f"[{config.MAX_DOWN_TREND_REL*100:.1f}%; {config.MAX_UP_TREND_REL*100:.1f}%])"
+                ),
+            }
+
         return _ok_result(
             graph_type="old_dip_dips",
             tier=5,
