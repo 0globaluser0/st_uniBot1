@@ -432,9 +432,9 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         config.FORECAST_TREND_WINDOW_DAYS
     )
 
-    # Для прогноза в нисходящем тренде используем более осторожный тренд –
-    # минимальный по модулю из основного 30-дневного и свежего (последние X дней).
-    if abs(trend_rel_30_points) <= abs(trend_rel_30_recent):
+    # Для прогноза в нисходящем тренде выбираем наибольший (с учётом знака)
+    # тренд между основным 30-дневным и свежим (последние X дней).
+    if trend_rel_30_points >= trend_rel_30_recent:
         trend_rel_forecast = trend_rel_30_points
         slope_forecast = slope_points
     else:
