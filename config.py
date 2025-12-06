@@ -64,6 +64,10 @@ MIN_TOTAL_AMOUNT_30D = 50
 # Максимально допустимый гэп между соседними точками (в часах)
 MAX_GAP_BETWEEN_POINTS_HOURS = 6.0
 
+# Сколько гэпов длительностью >= MAX_GAP_BETWEEN_POINTS_HOURS допускается
+# за последние GAP_FILTER_WINDOW_DAYS (0 = не допускаются вовсе)
+MAX_ALLOWED_LONG_GAPS = 0
+
 # Сколько последних дней учитывать при проверке гэпа между точками
 GAP_FILTER_WINDOW_DAYS = 27
 
