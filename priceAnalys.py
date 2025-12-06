@@ -370,8 +370,40 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         }
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
-    prices = [s.price for s in sales_sorted]
+    prices_raw = [s.price for s in sales_sorted]
     weights = [s.amount for s in sales_sorted]
+
+    def _price_corridor(values: List[float], weights_values: List[float]) -> Tuple[float, float]:
+        method = str(getattr(config, "PRICE_OUTLIER_METHOD", "quantile")).lower()
+        if method == "iqr":
+            q1 = weighted_quantile(values, weights_values, 0.25)
+            q3 = weighted_quantile(values, weights_values, 0.75)
+            iqr = q3 - q1
+            mult = float(getattr(config, "PRICE_OUTLIER_IQR_MULT", 1.5))
+            low = q1 - mult * iqr
+            high = q3 + mult * iqr
+        else:
+            low_q, high_q = getattr(config, "PRICE_OUTLIER_QUANTILES", (0.05, 0.95))
+            low_q = max(0.0, min(1.0, float(low_q)))
+            high_q = max(0.0, min(1.0, float(high_q)))
+            if low_q > high_q:
+                low_q, high_q = high_q, low_q
+            low = weighted_quantile(values, weights_values, low_q)
+            high = weighted_quantile(values, weights_values, high_q)
+
+        if low > high:
+            low, high = high, low
+        return low, high
+
+    low_corridor, high_corridor = _price_corridor(prices_raw, weights)
+    prices = [
+        max(low_corridor, min(price, high_corridor))
+        for price in prices_raw
+    ]
+
+    sales_clean = [
+        Sale(dt=s.dt, price=p, amount=s.amount) for s, p in zip(sales_sorted, prices)
+    ]
 
     base_price = weighted_quantile(prices, weights, 0.5)
     mean_price = weighted_mean(prices, weights)
@@ -385,7 +417,7 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
     p80 = weighted_quantile(prices, weights, 0.80)
 
     first_dt = sales_sorted[0].dt
-    t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_sorted]
+    t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_clean]
 
     slope_volume, intercept_volume = _linear_regression_params(
         t_vals, prices, weights
@@ -405,11 +437,11 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         if window_days <= 0:
             return 0.0, 0.0
 
-        last_dt = sales_sorted[-1].dt
+        last_dt = sales_clean[-1].dt
         cutoff = last_dt - timedelta(days=window_days)
-        window_sales = [s for s in sales_sorted if s.dt >= cutoff]
+        window_sales = [s for s in sales_clean if s.dt >= cutoff]
         if len(window_sales) < 2:
-            window_sales = sales_sorted
+            window_sales = sales_clean
 
         first_dt_local = window_sales[0].dt
         t_vals_local = [
