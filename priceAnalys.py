@@ -951,10 +951,12 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
 
 # ---------- Рекомендованная цена ----------
 
-def compute_rec_price_default(sales: List[Sale], q: float) -> Tuple[float, List[Sale]]:
+def compute_rec_price_default(
+    sales: List[Sale], q: float, recent_days: Optional[float] = None
+) -> Tuple[float, List[Sale]]:
     """
     Базовая рек. цена:
-      - последние RECENT_DAYS_FOR_REC_PRICE дней,
+      - последние recent_days (или RECENT_DAYS_FOR_REC_PRICE по умолчанию) дней,
       - взвешенный квантиль q (зависит от стабильности предмета).
     """
     if not sales:
@@ -962,7 +964,8 @@ def compute_rec_price_default(sales: List[Sale], q: float) -> Tuple[float, List[
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
     last_dt = sales_sorted[-1].dt
-    cutoff = last_dt - timedelta(days=config.RECENT_DAYS_FOR_REC_PRICE)
+    days = recent_days if recent_days is not None else config.RECENT_DAYS_FOR_REC_PRICE
+    cutoff = last_dt - timedelta(days=days)
 
     recent = [s for s in sales_sorted if s.dt >= cutoff]
     if len(recent) < 10:
@@ -983,10 +986,16 @@ def compute_stable_like_rec_price(
     тренда (может быть <1 при нисходящем тренде).
     """
 
-    base_price, base_sales = compute_rec_price_default(
-        sales, config.REC_PRICE_LOWER_Q_STABLE
-    )
     trend = metrics.get("trend_rel_30", 0.0)
+    recent_days = (
+        config.RECENT_DAYS_FOR_UPTREND_REC_PRICE
+        if trend > config.TREND_REL_FLAT_MAX
+        else None
+    )
+
+    base_price, base_sales = compute_rec_price_default(
+        sales, config.REC_PRICE_LOWER_Q_STABLE, recent_days
+    )
     forecast_trend = metrics.get("trend_rel_30_down_forecast", trend)
     trend_factor = 1.0
 
@@ -1435,7 +1444,9 @@ def classify_shape_basic(
     # 4) stable_up (tier 2): тренд вверх, не слишком резкий, форма спокойная
     if trend > config.TREND_REL_FLAT_MAX and trend <= config.MAX_UP_TREND_REL and shape_ok:
         rec_price, rec_price_sales = compute_rec_price_default(
-            sales, config.REC_PRICE_LOWER_Q_STABLE
+            sales,
+            config.REC_PRICE_LOWER_Q_STABLE,
+            config.RECENT_DAYS_FOR_UPTREND_REC_PRICE,
         )
         return _ok_result(
             graph_type="stable_up",
@@ -1511,8 +1522,13 @@ def classify_shape_basic(
         )
 
     # 7) всё остальное – нестабильные / сложные графики (tier 4)
+    recent_days = (
+        config.RECENT_DAYS_FOR_UPTREND_REC_PRICE
+        if trend > config.TREND_REL_FLAT_MAX
+        else None
+    )
     rec_price, rec_price_sales = compute_rec_price_default(
-        sales, config.REC_PRICE_LOWER_Q_VOLATILE
+        sales, config.REC_PRICE_LOWER_Q_VOLATILE, recent_days
     )
     graph_type = "volatile"
     trend_factor = 1.0
