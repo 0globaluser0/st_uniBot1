@@ -3,6 +3,9 @@
 # ------------ General paths ------------
 DB_PATH = "steam_analyser.db"
 
+# Отдельная база для блэклиста
+BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
+
 PROXIES_FILE = "proxies.txt"
 
 HTML_APPROVE_DIR = "HTML_steam_approve"
@@ -54,7 +57,19 @@ HTTP_TIMEOUT = 20.0
 # ------------ Аналитика продаж ------------
 
 # Минимальное количество проданных штук за 30 дней, чтобы вообще анализировать предмет
-MIN_TOTAL_AMOUNT_30D = 50
+MIN_TOTAL_AMOUNT_30D = 150
+
+# ------------ Разрывы между точками графика ------------
+
+# Максимально допустимый гэп между соседними точками (в часах)
+MAX_GAP_BETWEEN_POINTS_HOURS = 13.0
+
+# Сколько гэпов длительностью >= MAX_GAP_BETWEEN_POINTS_HOURS допускается
+# за последние GAP_FILTER_WINDOW_DAYS (0 = не допускаются вовсе)
+MAX_ALLOWED_LONG_GAPS = 3
+
+# Сколько последних дней учитывать при проверке гэпа между точками
+GAP_FILTER_WINDOW_DAYS = 21
 
 # ------------ Просадки по цене (dips) ------------
 
@@ -86,17 +101,17 @@ DIP_MAX_RECENT_DAYS = 0.5  # 0.5 суток ≈ 12 часов
 TREND_REL_FLAT_MAX = 0.08
 
 # Максимальный коэффициент вариации для стабильного графика
-STABLE_MAX_CV = 0.2
+STABLE_MAX_CV = 0.18
 
 # Максимальная относительная амплитуда между p20 и p80 (от base_price) для stable
-STABLE_MAX_WAVE_AMP = 0.23
+STABLE_MAX_WAVE_AMP = 0.2
 
 # Uptrend / downtrend thresholds:
 # максимально допустимый рост для "stable_up" (например +50% за 30 дней)
-MAX_UP_TREND_REL = 0.50
+MAX_UP_TREND_REL = 0.35
 
 # сильный нисходящий тренд (меньше этого) → сразу блэклист
-MAX_DOWN_TREND_REL = -0.3  # -40% за месяц
+MAX_DOWN_TREND_REL = -0.35  # -40% за месяц
 
 # ------------ Рекомендованная цена (общая) ------------
 
@@ -109,16 +124,31 @@ REC_PRICE_LOWER_Q_STABLE = 0.4
 REC_PRICE_LOWER_Q_VOLATILE = 0.35
 
 # Проверка достаточной поддержки продаж около рек. цены
-# На последней половине диапазона, использованного для расчёта рек. цены,
-# каждые REC_PRICE_SUPPORT_STEP_HOURS часов внутри окна REC_PRICE_SUPPORT_WINDOW_HOURS
-# должны быть продажи на цене >= rec_price в объёме не меньше
-# REC_PRICE_SUPPORT_MIN_SHARE доли от всего объёма окна. Иначе rec_price опускается
-# до максимального уровня, при котором условие выполняется во всех окнах.
-REC_PRICE_SUPPORT_STEP_HOURS = 12.0
-REC_PRICE_SUPPORT_WINDOW_HOURS = 12.0
-REC_PRICE_SUPPORT_MIN_SHARE = 0.3
+# На нескольких временных промежутках проверяется, что вокруг rec_price есть
+# достаточный объём продаж. Для каждого периода задаются:
+#   - HOURS: глубина в часах от последней продажи, в пределах которой строятся окна;
+#   - STEP_WINDOW_HOURS: единая величина для шага между окнами и их ширины;
+#   - MIN_SHARE: требуемая доля объёма продаж на цене >= rec_price внутри окна;
+#   - MAX_ALLOWED_VIOLATIONS: сколько окон в пределах периода могут нарушать условие,
+#     не требуя снижения rec_price.
+REC_PRICE_SUPPORT_PERIODS = [
+    {
+        "HOURS": 24.0,
+        "STEP_WINDOW_HOURS": 12.0,
+        "MIN_SHARE": 0.3,
+        "MAX_ALLOWED_VIOLATIONS": 0,
+        "MIN_WINDOW_VOLUME": 2,
+    },
+    {
+        "HOURS": 168.0,
+        "STEP_WINDOW_HOURS": 18.0,
+        "MIN_SHARE": 0.3,
+        "MAX_ALLOWED_VIOLATIONS": 2,
+        "MIN_WINDOW_VOLUME": 5,
+    },
+]
 # Минимальный суммарный объём продаж в окне, чтобы проверка считалась значимой
-# и единичные сделки не занижали rec_price.
+# и единичные сделки не занижали rec_price (используется как fallback).
 REC_PRICE_SUPPORT_MIN_WINDOW_VOLUME = 5
 
 # ------------ Волновые графики (wave) ------------
@@ -132,10 +162,15 @@ WAVE_MIN_DIP_DAYS = 0.3  # ~ 7 часов
 # Квантиль для rec_price по дипам (volume-weighted)
 REC_WAVE_Q = 0.35
 
+# Медианная цена для recent dips считается по последним N дням
+RECENT_DIP_MEDIAN_DAYS = 10.0
+
 # ------------ Нисходящий тренд: прогноз ------------
 
 # Горизонт прогноза в днях (между 7 и 14, ты предлагал 10)
-FORECAST_HORIZON_DAYS = 11.0
+FORECAST_HORIZON_DAYS = 10.0
+# Окно точек (в днях) для расчёта тренда при прогнозировании нисходящего графика
+FORECAST_TREND_WINDOW_DAYS = 21.0
 
 # ------------ Boost / Crash detection ------------
 
@@ -146,7 +181,7 @@ BOOST_RECENT_DAYS = 7.0
 BOOST_MIN_RATIO = 1.30  # рост на 30% и более
 
 # Условие краша: base_recent <= base_old * CRASH_MIN_RATIO
-CRASH_MIN_RATIO = 0.65  # падение на 25% и более
+CRASH_MIN_RATIO = 0.75  # падение на 25% и более
 
 # Минимальный объём в старой и новой части для надёжного детекта
 BOOST_MIN_OLD_VOLUME = 50
