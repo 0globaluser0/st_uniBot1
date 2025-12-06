@@ -1407,6 +1407,13 @@ def classify_shape_basic(
             "reason": f"strong_downtrend ({trend*100:.1f}%)",
         }
 
+    # 2a) Сильный восходящий тренд – блэклист (если это не буст)
+    if trend > config.MAX_UP_TREND_REL:
+        return {
+            "status": "blacklist",
+            "reason": f"strong_uptrend ({trend*100:.1f}%)",
+        }
+
     # shape_ok = спокойный график по разбросу
     shape_ok = (cv <= config.STABLE_MAX_CV and wave_amp <= config.STABLE_MAX_WAVE_AMP)
 
