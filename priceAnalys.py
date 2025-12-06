@@ -311,9 +311,13 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
       - trend_rel_30: относительный тренд за 30 дней (по точкам)
       - trend_rel_30_unweighted: относительный тренд за 30 дней (синоним trend_rel_30)
       - trend_rel_30_volume: относительный тренд за 30 дней (взвешенный по объёму)
+      - trend_rel_recent: относительный тренд за последние FORECAST_TREND_WINDOW_DAYS (по точкам)
+      - trend_rel_30_down_forecast: выбранный нисходящий тренд (осторожный минимум по модулю между 30д и свежим окном)
       - slope_per_day: наклон линейной регрессии (в валюте/день, по точкам)
       - slope_per_day_unweighted: наклон линейной регрессии (синоним slope_per_day)
       - slope_per_day_volume: наклон линейной регрессии (в валюте/день, взвешенный)
+      - slope_per_day_recent: наклон для свежего окна (по точкам)
+      - slope_per_day_down_forecast: наклон выбранного нисходящего тренда
     """
 
     def _linear_regression_params(
@@ -354,9 +358,13 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
             "trend_rel_30": 0.0,
             "trend_rel_30_unweighted": 0.0,
             "trend_rel_30_volume": 0.0,
+            "trend_rel_recent": 0.0,
+            "trend_rel_30_down_forecast": 0.0,
             "slope_per_day": 0.0,
             "slope_per_day_unweighted": 0.0,
             "slope_per_day_volume": 0.0,
+            "slope_per_day_recent": 0.0,
+            "slope_per_day_down_forecast": 0.0,
             "intercept_price": 0.0,
             "intercept_price_volume": 0.0,
         }
@@ -466,10 +474,12 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         "trend_rel_30": trend_rel_30_points,
         "trend_rel_30_unweighted": trend_rel_30_points,
         "trend_rel_30_volume": trend_rel_30_volume,
+        "trend_rel_recent": trend_rel_30_recent,
         "trend_rel_30_down_forecast": trend_rel_forecast,
         "slope_per_day": slope_points,
         "slope_per_day_unweighted": slope_points,
         "slope_per_day_volume": slope_volume,
+        "slope_per_day_recent": slope_points_recent,
         "slope_per_day_down_forecast": slope_forecast,
         "intercept_price": intercept_points,
         "intercept_price_volume": intercept_volume,
@@ -2128,6 +2138,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
         f"cv={metrics['cv_price']:.3f}, \n"
         f"trend_30_pts={metrics['trend_rel_30']*100:.1f}%, "
+        f"trend_{config.FORECAST_TREND_WINDOW_DAYS}_pts={metrics['trend_rel_recent']*100:.1f}%, "
         f"trend_30_vol={metrics['trend_rel_30_volume']*100:.1f}%, "
         f"trend_30_down_forecast={metrics['trend_rel_30_down_forecast']*100:.1f}%, "
         f"p20={metrics['p20']:.4f}, p80={metrics['p80']:.4f}, "
