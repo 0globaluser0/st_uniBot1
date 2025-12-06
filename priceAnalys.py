@@ -486,30 +486,37 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
     }
 
 
-def max_gap_between_points_hours(sales: List[Sale], window_days: float) -> float:
+def gap_stats_between_points(
+    sales: List[Sale], window_days: float, min_gap_hours: float
+) -> Tuple[float, int]:
     """
-    Возвращает максимальный промежуток (в часах) между соседними точками продаж
-    за последние window_days дней.
+    Возвращает:
+      - максимальный промежуток (в часах) между соседними точками продаж
+        за последние window_days дней;
+      - количество гэпов длительностью >= min_gap_hours в этом окне.
     """
     if len(sales) < 2:
-        return 0.0
+        return 0.0, 0
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
     cutoff_dt = sales_sorted[-1].dt - timedelta(days=window_days)
     filtered_sales = [s for s in sales_sorted if s.dt >= cutoff_dt]
 
     if len(filtered_sales) < 2:
-        return 0.0
+        return 0.0, 0
 
     max_gap = 0.0
+    long_gap_count = 0
     prev_dt = filtered_sales[0].dt
     for s in filtered_sales[1:]:
         gap_hours = (s.dt - prev_dt).total_seconds() / 3600.0
         if gap_hours > max_gap:
             max_gap = gap_hours
+        if gap_hours >= min_gap_hours:
+            long_gap_count += 1
         prev_dt = s.dt
 
-    return max_gap
+    return max_gap, long_gap_count
 
 
 # ---------- Просадки (dips) ----------
@@ -2119,14 +2126,17 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
     # чтобы предмет моментально отправлялся в блэклист без дальнейшего анализа.
-    max_gap_hours = max_gap_between_points_hours(
-        sales, config.GAP_FILTER_WINDOW_DAYS
+    max_gap_hours, long_gaps_count = gap_stats_between_points(
+        sales,
+        config.GAP_FILTER_WINDOW_DAYS,
+        config.MAX_GAP_BETWEEN_POINTS_HOURS,
     )
-    if max_gap_hours > config.MAX_GAP_BETWEEN_POINTS_HOURS:
+    if long_gaps_count > config.MAX_ALLOWED_LONG_GAPS:
         reason = (
             "gap_between_points_too_big "
-            f"({max_gap_hours:.1f}h > {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h "
-            f"within {config.GAP_FILTER_WINDOW_DAYS}d)"
+            f"({long_gaps_count} > {config.MAX_ALLOWED_LONG_GAPS} gaps "
+            f">= {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h within "
+            f"{config.GAP_FILTER_WINDOW_DAYS}d; max_gap={max_gap_hours:.1f}h)"
         )
         return blacklist_with_html(item_name, reason, html)
 
