@@ -57,19 +57,19 @@ HTTP_TIMEOUT = 20.0
 # ------------ Аналитика продаж ------------
 
 # Минимальное количество проданных штук за 30 дней, чтобы вообще анализировать предмет
-MIN_TOTAL_AMOUNT_30D = 50
+MIN_TOTAL_AMOUNT_30D = 150
 
 # ------------ Разрывы между точками графика ------------
 
 # Максимально допустимый гэп между соседними точками (в часах)
-MAX_GAP_BETWEEN_POINTS_HOURS = 6.0
+MAX_GAP_BETWEEN_POINTS_HOURS = 13.0
 
 # Сколько гэпов длительностью >= MAX_GAP_BETWEEN_POINTS_HOURS допускается
 # за последние GAP_FILTER_WINDOW_DAYS (0 = не допускаются вовсе)
-MAX_ALLOWED_LONG_GAPS = 0
+MAX_ALLOWED_LONG_GAPS = 3
 
 # Сколько последних дней учитывать при проверке гэпа между точками
-GAP_FILTER_WINDOW_DAYS = 27
+GAP_FILTER_WINDOW_DAYS = 21
 
 # ------------ Просадки по цене (dips) ------------
 
@@ -101,17 +101,17 @@ DIP_MAX_RECENT_DAYS = 0.5  # 0.5 суток ≈ 12 часов
 TREND_REL_FLAT_MAX = 0.08
 
 # Максимальный коэффициент вариации для стабильного графика
-STABLE_MAX_CV = 0.2
+STABLE_MAX_CV = 0.18
 
 # Максимальная относительная амплитуда между p20 и p80 (от base_price) для stable
-STABLE_MAX_WAVE_AMP = 0.23
+STABLE_MAX_WAVE_AMP = 0.2
 
 # Uptrend / downtrend thresholds:
 # максимально допустимый рост для "stable_up" (например +50% за 30 дней)
-MAX_UP_TREND_REL = 0.50
+MAX_UP_TREND_REL = 0.35
 
 # сильный нисходящий тренд (меньше этого) → сразу блэклист
-MAX_DOWN_TREND_REL = -0.3  # -40% за месяц
+MAX_DOWN_TREND_REL = -0.35  # -40% за месяц
 
 # ------------ Рекомендованная цена (общая) ------------
 
@@ -137,14 +137,14 @@ REC_PRICE_SUPPORT_PERIODS = [
         "STEP_WINDOW_HOURS": 12.0,
         "MIN_SHARE": 0.3,
         "MAX_ALLOWED_VIOLATIONS": 0,
-        "MIN_WINDOW_VOLUME": 5,
+        "MIN_WINDOW_VOLUME": 2,
     },
     {
         "HOURS": 168.0,
-        "STEP_WINDOW_HOURS": 12.0,
+        "STEP_WINDOW_HOURS": 18.0,
         "MIN_SHARE": 0.3,
-        "MAX_ALLOWED_VIOLATIONS": 0,
-        "MIN_WINDOW_VOLUME": 8,
+        "MAX_ALLOWED_VIOLATIONS": 2,
+        "MIN_WINDOW_VOLUME": 5,
     },
 ]
 # Минимальный суммарный объём продаж в окне, чтобы проверка считалась значимой
@@ -163,14 +163,14 @@ WAVE_MIN_DIP_DAYS = 0.3  # ~ 7 часов
 REC_WAVE_Q = 0.35
 
 # Медианная цена для recent dips считается по последним N дням
-RECENT_DIP_MEDIAN_DAYS = 3.0
+RECENT_DIP_MEDIAN_DAYS = 10.0
 
 # ------------ Нисходящий тренд: прогноз ------------
 
 # Горизонт прогноза в днях (между 7 и 14, ты предлагал 10)
-FORECAST_HORIZON_DAYS = 11.0
+FORECAST_HORIZON_DAYS = 10.0
 # Окно точек (в днях) для расчёта тренда при прогнозировании нисходящего графика
-FORECAST_TREND_WINDOW_DAYS = 10.0
+FORECAST_TREND_WINDOW_DAYS = 21.0
 
 # ------------ Boost / Crash detection ------------
 
