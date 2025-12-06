@@ -26,6 +26,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import config
 import priceAnalys
+import requests
 
 
 # ---------------------- Models ----------------------
@@ -247,6 +248,35 @@ class LisskinsClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
+    def fetch_balance(self) -> Optional[float]:
+        """Возвращает доступный баланс аккаунта через публичное API."""
+
+        url = f"{config.LISSKINS_API_URL}/user/balance"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            response = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
+            response.raise_for_status()
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            print(f"[LISSKINS] Не удалось получить баланс: {exc}")
+            return None
+
+        data: Any = None
+        try:
+            data = response.json()
+        except ValueError:
+            print("[LISSKINS] Некорректный ответ при получении баланса")
+            return None
+
+        if isinstance(data, dict):
+            for key in ("balance", "available_balance", "available", "availableBalance"):
+                value = data.get(key)
+                try:
+                    if value is not None:
+                        return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     def fetch_items_json(self) -> List[Dict[str, Any]]:
         # TODO: заменить на настоящий вызов. Заглушка возвращает пустой список.
         return []
@@ -271,6 +301,8 @@ class LisskinsBot:
         self.purchase_queue: asyncio.Queue[LisskinsLot] = asyncio.Queue()
 
         self.websocket_priority: Deque[Tuple[float, LisskinsLot]] = deque()
+        # (timestamp, balance)
+        self._balance_cache: Optional[Tuple[float, float]] = None
 
     # region Filters and utilities
     def _game_allowed(self, lot: LisskinsLot) -> bool:
@@ -326,7 +358,18 @@ class LisskinsBot:
             priceAnalys.remove_from_blacklist(lot.name)
         return True
 
-    def _respect_inventory_limit(self, price: float) -> bool:
+    async def _balance_hint(self) -> Optional[float]:
+        now = time.time()
+        if self._balance_cache and now - self._balance_cache[0] < 60:
+            return self._balance_cache[1]
+
+        loop = asyncio.get_running_loop()
+        balance = await loop.run_in_executor(None, self.client.fetch_balance)
+        if balance is not None:
+            self._balance_cache = (now, balance)
+        return balance
+
+    async def _respect_inventory_limit(self, price: float) -> bool:
         current_hold = self.purchase_storage.count_hold_items(max_hold_days=7)
         if current_hold < 800:
             return True
@@ -334,7 +377,7 @@ class LisskinsBot:
         if slots_left <= 0:
             return False
 
-        balance_hint = getattr(config, "LISSKINS_BALANCE_USD", None)
+        balance_hint = await self._balance_hint()
         min_price = config.LISSKINS_PRICE_MIN
         if isinstance(balance_hint, (int, float)) and balance_hint > 0:
             min_price = max(min_price, balance_hint / slots_left)
@@ -443,7 +486,7 @@ class LisskinsBot:
         if spent + lot.price_usd * lot.amount > config.MAX_SPEND_USD_PER_PERIOD:
             return
 
-        if not self._respect_inventory_limit(lot.price_usd):
+        if not await self._respect_inventory_limit(lot.price_usd):
             return
 
         unlock_at = datetime.utcnow() + timedelta(days=lot.hold_days)
