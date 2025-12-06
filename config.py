@@ -6,6 +6,9 @@ DB_PATH = "steam_analyser.db"
 # Отдельная база для блэклиста
 BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
 
+# Основная база закупок (агрегаты) по каждому аккаунту Lisskins создаётся отдельно.
+PURCHASES_DB_TEMPLATE = "purchases_{account}.db"
+
 PROXIES_FILE = "proxies.txt"
 
 HTML_APPROVE_DIR = "HTML_steam_approve"
@@ -13,6 +16,48 @@ HTML_BLACKLIST_DIR = "HTML_steam_blacklist"
 HTML_FAILED_DIR = "HTML_steam_failed"
 SELL_PARSING_DIR = "sell_parsing"
 HTML_TEMP_DIR = "HTML_temp"
+
+# ------------ Lisskins integration ------------
+
+# Базовый URL публичного API Lisskins (см. https://lis-skins-ru.stoplight.io/). Можно
+# переопределить через переменные окружения или локальную правку, если эндпоинт другой.
+LISSKINS_API_URL = "https://lis-skins.ru/api/v2"
+
+# Какие игры анализируем. True = включена, False = выключена.
+ALLOW_CS2 = True
+ALLOW_DOTA2 = True
+
+# Ключевые слова, которые запрещают покупку (регистр и язык названия не важен).
+EXCLUDED_KEYWORDS = [
+    "case",
+    "souvenir",
+]
+
+# Ограничение цены на самый дешёвый лот на Lisskins (USD).
+LISSKINS_PRICE_MIN = 0.05
+LISSKINS_PRICE_MAX = 500.0
+
+# Минимальный процент доходности: (rec_price*0.8697 / price) - 1 >= MIN_PROFITABILITY.
+MIN_PROFITABILITY = 0.05
+
+# Максимальный срок холда для покупки (дни).
+MAX_HOLD_DAYS = 7
+
+# Ограничение по количеству лотов на период X дней: perc_of_avg_sales * avg_sales_week.
+MAX_LOTS_PERCENT_OF_AVG_SALES = 0.3
+PURCHASE_LIMIT_DAYS = 2  # период для учёта купленного количества
+
+# Ограничение по сумме закупки предмета на период Y дней.
+MAX_SPEND_USD_PER_PERIOD = 300.0
+SPEND_LIMIT_DAYS = 2
+
+# Таймаут для приоритезации свежих лотов из websocket (секунды).
+WEBSOCKET_PRIORITY_WINDOW = 10.0
+
+# Количество асинхронных воркеров для анализа графиков и покупок.
+# Чем больше значения, тем выше параллелизм парсинга и выкупа.
+ANALYSIS_WORKERS = 4
+PURCHASE_WORKERS = 2
 
 # ------------ Caching / DB freshness ------------
 
