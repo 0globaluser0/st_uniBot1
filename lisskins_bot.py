@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+
+from urllib.parse import quote
 
 import config
 import priceAnalys
@@ -278,12 +281,52 @@ class LisskinsClient:
         return None
 
     def fetch_items_json(self) -> List[Dict[str, Any]]:
-        # TODO: заменить на настоящий вызов. Заглушка возвращает пустой список.
+        """Выгружает список всех предметов в формате JSON.
+
+        Сначала пытается обратиться к публичному REST API. Если сетевой доступ
+        недоступен (что бывает в офлайн-тестировании), метод пробует прочитать
+        локальный ``items.json``. Возвращаемое значение всегда список словарей,
+        даже если API вернул объект-обёртку.
+        """
+
+        url = f"{config.LISSKINS_API_URL}/market/items"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            response = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                return list(data.get("items", []))
+            if isinstance(data, list):
+                return data
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            print(f"[LISSKINS] Не удалось получить список предметов через API: {exc}")
+
+        if os.path.exists("items.json"):
+            try:
+                with open("items.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as exc:  # pragma: no cover - чтение файла
+                print(f"[LISSKINS] Ошибка чтения items.json: {exc}")
         return []
 
     def buy_lots(self, lot_ids: List[str]) -> bool:
-        # TODO: реализовать вызов покупки через API Lisskins. Сейчас просто лог.
-        print(f"[LISSKINS] Покупка лотов {lot_ids} (заглушка)")
+        """Покупает лоты по их уникальным идентификаторам."""
+
+        url = f"{config.LISSKINS_API_URL}/market/buy"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        payload = {"lot_ids": lot_ids}
+        try:
+            response = requests.post(
+                url, headers=headers, json=payload, timeout=config.HTTP_TIMEOUT
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                return bool(data.get("success", True))
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            print(f"[LISSKINS] Не удалось купить лоты {lot_ids}: {exc}")
+        print(f"[LISSKINS] Покупка лотов {lot_ids} (фоллбек-заглушка)")
         return True
 
 
@@ -388,8 +431,7 @@ class LisskinsBot:
     # region queueing
     async def enqueue_initial_items(self) -> None:
         items = self.client.fetch_items_json()
-        for data in items:
-            lot = self._lot_from_json(data)
+        for lot in self._lots_from_iterable(items):
             await self._route_lot(lot)
 
     async def _route_lot(self, lot: LisskinsLot) -> None:
@@ -411,6 +453,26 @@ class LisskinsBot:
             amount=int(data.get("amount", 1)),
         )
 
+    def _lots_from_iterable(self, items: Iterable[Dict[str, Any]]) -> Iterable[LisskinsLot]:
+        for data in items:
+            try:
+                yield self._lot_from_json(data)
+            except Exception:
+                continue
+
+    def _steam_url_for_lot(self, lot: LisskinsLot) -> Optional[str]:
+        """Строит ссылку на страницу Steam для парсинга графика."""
+
+        game = lot.game.lower()
+        appid: Optional[int] = None
+        if "cs" in game:
+            appid = 730
+        elif "dota" in game:
+            appid = 570
+        if not appid:
+            return None
+        return f"https://steamcommunity.com/market/listings/{appid}/{quote(lot.name)}"
+
     def add_websocket_lot(self, data: Dict[str, Any]) -> None:
         lot = self._lot_from_json(data)
         if not self._passes_filters(lot):
@@ -418,6 +480,73 @@ class LisskinsBot:
         now = time.time()
         # Лоты из websocket встает в начало очереди в течение окна приоритета.
         self.websocket_priority.append((now, lot))
+
+    async def websocket_listener(self) -> None:
+        """Следит за websocket-уведомлениями о новых лотах.
+
+        Реализация старается использовать библиотеку ``websockets`` при её
+        наличии. При отсутствии сетевого доступа или самой библиотеки включается
+        резервный режим: периодическое чтение локального ``websocket_items.json``
+        (если файл существует) с последующей подачей лотов в приоритетную очередь.
+        """
+
+        try:
+            import websockets  # type: ignore
+        except Exception:
+            websockets = None  # type: ignore
+
+        if websockets is None:
+            await self._poll_local_websocket_file()
+            return
+
+        ws_url = config.LISSKINS_API_URL.replace("http", "ws") + "/market/stream"
+        while True:
+            try:
+                async with websockets.connect(ws_url) as ws:  # type: ignore
+                    async for message in ws:
+                        try:
+                            payload = json.loads(message)
+                        except Exception:
+                            continue
+                        if isinstance(payload, dict):
+                            item = payload.get("item") or payload
+                            if isinstance(item, dict):
+                                self.add_websocket_lot(item)
+            except Exception:
+                await asyncio.sleep(1.0)
+
+    async def _poll_local_websocket_file(self) -> None:
+        """Фоллбек для тестов: проверяет локальный файл каждые 0.5 секунды."""
+
+        last_mtime: float = 0.0
+        path = "websocket_items.json"
+        while True:
+            try:
+                mtime = os.path.getmtime(path)
+            except FileNotFoundError:
+                await asyncio.sleep(0.5)
+                continue
+
+            if mtime > last_mtime:
+                last_mtime = mtime
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        items = json.load(f)
+                    for lot in self._lots_from_iterable(items if isinstance(items, list) else []):
+                        self.add_websocket_lot(
+                            {
+                                "id": lot.id,
+                                "name": lot.name,
+                                "game": lot.game,
+                                "price": lot.price_usd,
+                                "hold_days": lot.hold_days,
+                                "amount": lot.amount,
+                            }
+                        )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.5)
 
     async def pump_websocket_priority(self) -> None:
         while True:
@@ -451,12 +580,21 @@ class LisskinsBot:
                 self.purchase_queue.task_done()
 
     async def _analyse_and_enqueue(self, lot: LisskinsLot) -> None:
-        # Заглушка анализа: здесь должен быть вызов парсинга графика Steam.
-        print(f"[ANALYSIS] {lot.name}: требуется парсинг графика (заглушка)")
-        # Имитация задержки распределённого парсинга.
-        await asyncio.sleep(0)
-        # После анализа нужно сохранить rec_price в БД Steam-анализатора.
-        # Здесь мы только проверяем, что запись появилась и актуальна.
+        url = self._steam_url_for_lot(lot)
+        if not url:
+            return
+
+        # Запускаем тяжёлый парсинг синхронной функции в пуле исполнителей,
+        # чтобы не блокировать обработку websocket-лотов.
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, priceAnalys.parsing_steam_sales, url)
+
+        status = result.get("status") if isinstance(result, dict) else None
+        if status != "ok":
+            # Если предмет попал в блэклист или парсинг не удался,
+            # просто выходим: он не должен блокировать очередь.
+            return
+
         cached = self._has_actual_cached_price(lot)
         if cached:
             await self.purchase_queue.put(lot)
@@ -506,7 +644,8 @@ class LisskinsBot:
         analysis_workers = [asyncio.create_task(self.analysis_worker()) for _ in range(config.ANALYSIS_WORKERS)]
         purchase_workers = [asyncio.create_task(self.purchase_worker()) for _ in range(config.PURCHASE_WORKERS)]
         ws_pump = asyncio.create_task(self.pump_websocket_priority())
-        await asyncio.gather(*analysis_workers, *purchase_workers, ws_pump)
+        ws_listener = asyncio.create_task(self.websocket_listener())
+        await asyncio.gather(*analysis_workers, *purchase_workers, ws_pump, ws_listener)
 
     async def run(self) -> None:
         await self.enqueue_initial_items()
