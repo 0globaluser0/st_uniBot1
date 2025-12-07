@@ -23,6 +23,10 @@ HTML_TEMP_DIR = "HTML_temp"
 # переопределить через переменные окружения или локальную правку, если эндпоинт другой.
 LISSKINS_API_URL = "https://lis-skins.ru/api/v2"
 
+# WebSocket-стрим котировок Lisskins. При необходимости замените на актуальный из
+# документации.
+LISSKINS_WS_URL = "wss://lis-skins.ru/api/v2/market/stream"
+
 # Какие игры анализируем. True = включена, False = выключена.
 ALLOW_CS2 = True
 ALLOW_DOTA2 = True
