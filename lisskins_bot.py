@@ -251,28 +251,55 @@ class LisskinsClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
+    # region HTTP helpers
+    def _headers(self) -> Dict[str, str]:
+        """Готовит заголовки авторизации согласно публичной документации.
+
+        В официальном описании используется схема ``Api-Key`` (https://lis-skins-
+        ru.stoplight.io/docs/lis-skins-ru-public-user-api). Для совместимости с
+        ранними черновиками добавляется дублирование в ``X-Api-Key``.
+        """
+
+        return {
+            "Accept": "application/json",
+            "Authorization": f"Api-Key {self.api_key}",
+            "X-Api-Key": self.api_key,
+        }
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> Optional[Any]:
+        url = f"{config.LISSKINS_API_URL}{path}"
+        headers = kwargs.pop("headers", {})
+        merged_headers = {**self._headers(), **headers}
+
+        try:
+            response = requests.request(
+                method, url, headers=merged_headers, timeout=config.HTTP_TIMEOUT, **kwargs
+            )
+            response.raise_for_status()
+        except Exception as exc:  # pragma: no cover - сетевые ошибки
+            print(f"[LISSKINS] Запрос {method} {url} завершился ошибкой: {exc}")
+            return None
+
+        try:
+            return response.json()
+        except ValueError:
+            print(f"[LISSKINS] Не удалось распарсить JSON для {url}")
+            return None
+
+    # endregion
+
+    # region API methods
     def fetch_balance(self) -> Optional[float]:
         """Возвращает доступный баланс аккаунта через публичное API."""
 
-        url = f"{config.LISSKINS_API_URL}/user/balance"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            response = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
-            response.raise_for_status()
-        except Exception as exc:  # pragma: no cover - сетевые ошибки
-            print(f"[LISSKINS] Не удалось получить баланс: {exc}")
+        data = self._request("GET", "/user/profile")
+        if not isinstance(data, dict):
             return None
 
-        data: Any = None
-        try:
-            data = response.json()
-        except ValueError:
-            print("[LISSKINS] Некорректный ответ при получении баланса")
-            return None
-
-        if isinstance(data, dict):
-            for key in ("balance", "available_balance", "available", "availableBalance"):
-                value = data.get(key)
+        payload = data.get("data", data)
+        if isinstance(payload, dict):
+            for key in ("availableBalance", "available_balance", "balance", "available"):
+                value = payload.get(key)
                 try:
                     if value is not None:
                         return float(value)
@@ -283,24 +310,23 @@ class LisskinsClient:
     def fetch_items_json(self) -> List[Dict[str, Any]]:
         """Выгружает список всех предметов в формате JSON.
 
-        Сначала пытается обратиться к публичному REST API. Если сетевой доступ
-        недоступен (что бывает в офлайн-тестировании), метод пробует прочитать
-        локальный ``items.json``. Возвращаемое значение всегда список словарей,
-        даже если API вернул объект-обёртку.
+        Запрос следует официальному REST API: ``GET /market/items`` с API-ключом
+        в заголовке. Функция допускает ответ вида ``{"items": [...]}`` или
+        ``{"data": [...]}`` (разные ревизии документации). При недоступности
+        сети используется локальный ``items.json``.
         """
 
-        url = f"{config.LISSKINS_API_URL}/market/items"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            response = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, dict):
-                return list(data.get("items", []))
-            if isinstance(data, list):
-                return data
-        except Exception as exc:  # pragma: no cover - сетевые ошибки
-            print(f"[LISSKINS] Не удалось получить список предметов через API: {exc}")
+        params = {
+            "game": "all",
+            "tradeBanMaxDays": config.MAX_HOLD_DAYS,
+        }
+        data = self._request("GET", "/market/items", params=params)
+        if isinstance(data, dict):
+            items = data.get("items") or data.get("data")
+            if isinstance(items, list):
+                return items
+        if isinstance(data, list):
+            return data
 
         if os.path.exists("items.json"):
             try:
@@ -311,23 +337,29 @@ class LisskinsClient:
         return []
 
     def buy_lots(self, lot_ids: List[str]) -> bool:
-        """Покупает лоты по их уникальным идентификаторам."""
+        """Покупает лоты по их уникальным идентификаторам согласно API.
 
-        url = f"{config.LISSKINS_API_URL}/market/buy"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        payload = {"lot_ids": lot_ids}
-        try:
-            response = requests.post(
-                url, headers=headers, json=payload, timeout=config.HTTP_TIMEOUT
-            )
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, dict):
-                return bool(data.get("success", True))
-        except Exception as exc:  # pragma: no cover - сетевые ошибки
-            print(f"[LISSKINS] Не удалось купить лоты {lot_ids}: {exc}")
+        Согласно документации, покупка происходит POST-запросом к
+        ``/market/buy`` с массивом ``lot_ids`` (или ``ids`` в ранних версиях).
+        Метод пробует оба поля, если сервер возвращает JSON-ответ.
+        """
+
+        payload = {"lot_ids": lot_ids, "ids": lot_ids}
+        data = self._request("POST", "/market/buy", json=payload)
+        if isinstance(data, dict):
+            success = data.get("success")
+            if success is None:
+                success = data.get("result")
+            if success is None and "data" in data:
+                success = data.get("data")
+            if success is None:
+                success = True
+            return bool(success)
+
         print(f"[LISSKINS] Покупка лотов {lot_ids} (фоллбек-заглушка)")
         return True
+
+    # endregion
 
 
 # ---------------------- Bot logic ----------------------
@@ -444,13 +476,32 @@ class LisskinsBot:
             await self.analysis_queue.put(lot)
 
     def _lot_from_json(self, data: Dict[str, Any]) -> LisskinsLot:
+        if not isinstance(data, dict):
+            raise ValueError("Lot payload must be a dict")
+
+        payload = data.get("item") if isinstance(data.get("item"), dict) else data
+
+        price_value = payload.get("priceUsd")
+        if price_value is None:
+            price_value = payload.get("price_usd")
+        if price_value is None:
+            price_value = payload.get("price")
+
+        hold_days_value = (
+            payload.get("hold_days")
+            or payload.get("holdDays")
+            or payload.get("withdraw_after_days")
+            or payload.get("withdrawAfterDays")
+            or payload.get("tradeBan")
+        )
+
         return LisskinsLot(
-            id=str(data.get("id")),
-            name=str(data.get("name")),
-            game=str(data.get("game", "")),
-            price_usd=float(data.get("price", 0.0)),
-            hold_days=int(data.get("hold_days", 0)),
-            amount=int(data.get("amount", 1)),
+            id=str(payload.get("id")),
+            name=str(payload.get("name")),
+            game=str(payload.get("game") or payload.get("app", "")),
+            price_usd=float(price_value or 0.0),
+            hold_days=int(hold_days_value or 0),
+            amount=int(payload.get("amount", 1)),
         )
 
     def _lots_from_iterable(self, items: Iterable[Dict[str, Any]]) -> Iterable[LisskinsLot]:
@@ -499,7 +550,7 @@ class LisskinsBot:
             await self._poll_local_websocket_file()
             return
 
-        ws_url = config.LISSKINS_API_URL.replace("http", "ws") + "/market/stream"
+        ws_url = config.LISSKINS_WS_URL or config.LISSKINS_API_URL.replace("http", "ws") + "/market/stream"
         while True:
             try:
                 async with websockets.connect(ws_url) as ws:  # type: ignore
