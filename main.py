@@ -1,17 +1,22 @@
 # main.py - console interface for Steam price analyser
 
+import argparse
+import asyncio
+
 import config
 import priceAnalys
+from lisskins_bot import run_accounts_sequentially
 
 
-def main() -> None:
+def run_steam_cli() -> None:
+    """Старый режим анализа конкретной ссылки Steam."""
+
     print("Steam price analyser (без телеграма)")
     print("====================================")
     print("Файл БД:", config.DB_PATH)
     print("Режим прокси:", config.PROXY_SELECT)
     print()
 
-    # Инициализируем БД и папки
     priceAnalys.init_db()
     priceAnalys.load_proxies_from_file()
 
@@ -50,6 +55,24 @@ def main() -> None:
             )
         else:
             print(f"[WARN] Неизвестный статус: {status}, результат: {result}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Steam analyser и бот Lisskins")
+    parser.add_argument(
+        "--mode",
+        choices=["steam", "lisskins"],
+        default="steam",
+        help="Режим работы: steam — ручной ввод ссылок, lisskins — очередь закупок",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "steam":
+        run_steam_cli()
+    else:
+        priceAnalys.init_db()
+        priceAnalys.load_proxies_from_file()
+        asyncio.run(run_accounts_sequentially())
 
 
 if __name__ == "__main__":
