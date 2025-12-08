@@ -295,6 +295,7 @@ class LissWebSocketClient:
             return
 
         normalized = {
+            "event": event_type,
             "lis_item_id": payload.get("id") or payload.get("lis_item_id") or payload.get("lot_id"),
             "steam_market_name": payload.get("market_hash_name") or payload.get("name"),
             "game_code": payload.get("app_id") or payload.get("game"),

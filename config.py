@@ -246,6 +246,9 @@ LISS_SUM_LIMIT_PERIOD_DAYS = 7
 LISS_JSON_REQUEST_DELAY = 1.0   # сек между JSON-загрузками
 LISS_API_REQUEST_DELAY = 0.5    # сек между REST-запросами
 
+# Периодическая полная ресинхронизация состояния рынка (0 = отключена)
+LISS_JSON_RESYNC_MINUTES = 0
+
 # Сколько секунд сохраняется повышенный приоритет для новых лотов из WebSocket
 LISS_WS_PRIORITY_WINDOW_SEC = 10
 
