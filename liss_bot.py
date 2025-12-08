@@ -46,6 +46,8 @@ _high_priority_group = 0
 _liss_buy_attempts: Dict[Tuple[str, str], int] = {}
 _liss_buy_temp_locks: Dict[Tuple[str, str], float] = {}
 _liss_buy_blacklist: Dict[Tuple[str, str], str] = {}
+_account_price_floor: Dict[str, float] = {}
+_account_locked_qty: Dict[str, int] = {}
 
 
 def _extract_lot_price(lot: Dict[str, Any], fallback: Optional[float]) -> Optional[float]:
@@ -203,8 +205,8 @@ def _contains_excluded_keyword(name: str) -> bool:
     return any(keyword.lower() in lower_name for keyword in config.LISS_EXCLUDED_KEYWORDS)
 
 
-def _price_in_range(price: float) -> bool:
-    return config.LISS_MIN_PRICE_USD <= price <= config.LISS_MAX_PRICE_USD
+def _price_in_range(price: float, min_price: float) -> bool:
+    return min_price <= price <= config.LISS_MAX_PRICE_USD
 
 
 def _is_blacklisted(item_name: str) -> bool:
@@ -265,9 +267,11 @@ def _select_profitable_lots(
     avg_sales: float,
     account_name: str,
     fallback_price: Optional[float] = None,
+    min_price_usd: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
     now_dt = datetime.utcnow()
     steam_net_price = rec_price * 0.8697
+    effective_min_price = min_price_usd if min_price_usd is not None else _effective_min_price(account_name)
 
     remaining_qty, remaining_sum = priceAnalys.calculate_remaining_liss_limits(
         steam_market_name, account_name, avg_sales, now_dt
@@ -285,7 +289,7 @@ def _select_profitable_lots(
         hold_days = _extract_lot_hold_days(lot)
         if hold_days > config.LISS_MAX_HOLD_DAYS:
             continue
-        if not _price_in_range(lot_price):
+        if not _price_in_range(lot_price, effective_min_price):
             continue
 
         profit_ratio = (steam_net_price - lot_price) / lot_price
@@ -376,6 +380,7 @@ async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
 
             rec_price = float(analysis.get("rec_price") or 0.0)
             avg_sales = float(analysis.get("avg_sales") or 0.0)
+            effective_min_price = _effective_min_price(account_name)
 
             selected_lots, profit_estimate = _select_profitable_lots(
                 item.lots,
@@ -386,6 +391,7 @@ async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
                 avg_sales,
                 account_name,
                 fallback_price=item.current_lis_price,
+                min_price_usd=effective_min_price,
             )
 
             selected_lots = _filter_available_lots(selected_lots, account_name)
@@ -511,21 +517,65 @@ async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None
                     f"status={status} price={price_usd} qty={quantity}"
                 )
         finally:
+            try:
+                await _refresh_account_price_floor(request.account_name, client)
+            except Exception as e:
+                print(f"[PRICE_FLOOR] Не удалось обновить порог цены: {e}")
             liss_buy_queue.task_done()
 
 
 def _lot_passes_basic_filters(
-    steam_market_name: str, game_code: int, price_usd: float, hold_days: int
+    steam_market_name: str,
+    game_code: int,
+    price_usd: float,
+    hold_days: int,
+    *,
+    min_price_usd: Optional[float] = None,
 ) -> bool:
     if not _game_enabled(game_code):
         return False
     if _contains_excluded_keyword(steam_market_name):
         return False
-    if not _price_in_range(price_usd):
+    effective_min_price = min_price_usd if min_price_usd is not None else config.LISS_MIN_PRICE_USD
+    if not _price_in_range(price_usd, effective_min_price):
         return False
     if hold_days > config.LISS_MAX_HOLD_DAYS:
         return False
     return True
+
+
+def _effective_min_price(account_name: str) -> float:
+    return _account_price_floor.get(account_name, config.LISS_MIN_PRICE_USD)
+
+
+async def _refresh_account_price_floor(account_name: str, client: LissApiClient) -> None:
+    locked_qty = priceAnalys.count_liss_locked_purchases(account_name)
+    _account_locked_qty[account_name] = locked_qty
+
+    effective_min_price = config.LISS_MIN_PRICE_USD
+
+    if locked_qty >= config.LISS_LOCKED_ITEMS_WARNING_THRESHOLD:
+        try:
+            balance_usd = await client.get_balance()
+        except Exception as e:
+            print(f"[PRICE_FLOOR] Не удалось получить баланс {account_name}: {e}")
+            balance_usd = 0.0
+
+        free_slots = config.LISS_MAX_INVENTORY_SLOTS - locked_qty
+        if free_slots <= 0:
+            free_slots = 1
+
+        dynamic_min_price = math.ceil((balance_usd / free_slots) * 100) / 100.0
+        effective_min_price = max(config.LISS_MIN_PRICE_USD, dynamic_min_price)
+
+    previous_price = _account_price_floor.get(account_name)
+    _account_price_floor[account_name] = effective_min_price
+
+    if previous_price != effective_min_price:
+        print(
+            f"[PRICE_FLOOR] account={account_name} locked_qty={locked_qty} "
+            f"min_price={effective_min_price:.2f}"
+        )
 
 
 def _pick_cheapest_lot(lots: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -600,9 +650,12 @@ async def _handle_candidate_lot(
     lot_price = _lot_price(lot)
     hold_days = _extract_lot_hold_days(lot)
 
+    effective_min_price = _effective_min_price(account_name)
     if steam_market_name is None or lot_price is None:
         return
-    if not _lot_passes_basic_filters(steam_market_name, game_code, lot_price, hold_days):
+    if not _lot_passes_basic_filters(
+        steam_market_name, game_code, lot_price, hold_days, min_price_usd=effective_min_price
+    ):
         return
     if _is_blacklisted(steam_market_name):
         return
@@ -619,6 +672,7 @@ async def _handle_candidate_lot(
             avg_sales,
             account_name,
             fallback_price=lot_price,
+            min_price_usd=effective_min_price,
         )
 
         selected_lots = _filter_available_lots(selected_lots, account_name)
@@ -655,7 +709,7 @@ async def _process_initial_json_snapshot(
     account_name: str,
     session: Any,
 ) -> Dict[Tuple[int, str], List[Dict[str, Any]]]:
-    current_items = await _load_current_market_state(session)
+    current_items = await _load_current_market_state(account_name, session)
 
     for (game_code, steam_market_name), lots in current_items.items():
         best_lot = _pick_cheapest_lot(lots)
@@ -667,7 +721,9 @@ async def _process_initial_json_snapshot(
     return current_items
 
 
-async def _load_current_market_state(session: Any) -> Dict[Tuple[int, str], List[Dict[str, Any]]]:
+async def _load_current_market_state(
+    account_name: str, session: Any
+) -> Dict[Tuple[int, str], List[Dict[str, Any]]]:
     enabled_games = []
     if config.LISS_ENABLE_CS2:
         enabled_games.append(730)
@@ -675,6 +731,7 @@ async def _load_current_market_state(session: Any) -> Dict[Tuple[int, str], List
         enabled_games.append(570)
 
     current_items: Dict[Tuple[int, str], List[Dict[str, Any]]] = {}
+    effective_min_price = _effective_min_price(account_name)
 
     async def _load_game(game_code: int) -> None:
         raw_items = await fetch_full_json_for_game(game_code, session=session)
@@ -701,7 +758,11 @@ async def _load_current_market_state(session: Any) -> Dict[Tuple[int, str], List
             }
 
             if not _lot_passes_basic_filters(
-                steam_market_name, lot["game_code"], lot["price_usd"], hold_days
+                steam_market_name,
+                lot["game_code"],
+                lot["price_usd"],
+                hold_days,
+                min_price_usd=effective_min_price,
             ):
                 continue
 
@@ -725,7 +786,7 @@ async def _periodic_resync_state(
     while True:
         await asyncio.sleep(interval)
         try:
-            snapshot = await _load_current_market_state(session)
+            snapshot = await _load_current_market_state(account_name, session)
         except Exception as e:
             print(f"[RESYNC] Ошибка загрузки снапшота: {e}")
             continue
@@ -778,6 +839,7 @@ async def _websocket_consumer(
 
             key = (game_code, steam_market_name)
             candidate_lot: Optional[Dict[str, Any]] = None
+            effective_min_price = _effective_min_price(account_name)
 
             async with state_lock:
                 prev_best = _pick_cheapest_lot(current_items.get(key, []))
@@ -791,7 +853,11 @@ async def _websocket_consumer(
                     if lot_price is None:
                         new_best = None
                     elif not _lot_passes_basic_filters(
-                        steam_market_name, game_code, lot_price, hold_days
+                        steam_market_name,
+                        game_code,
+                        lot_price,
+                        hold_days,
+                        min_price_usd=effective_min_price,
                     ):
                         new_best = None
                     else:
@@ -826,6 +892,8 @@ async def run_liss_market(account_name: str, api_key: str, session: Any) -> None
     client = LissApiClient(api_key, account_name, session)
     ws_events: asyncio.Queue = asyncio.Queue()
     ws_client = LissWebSocketClient(api_key, ws_events)
+
+    await _refresh_account_price_floor(account_name, client)
 
     buyer_tasks = [
         asyncio.create_task(liss_buy_worker(idx + 1, client))

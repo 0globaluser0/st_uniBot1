@@ -529,6 +529,26 @@ def fetch_liss_short_hold_purchases(account_name: str) -> List[sqlite3.Row]:
     return rows
 
 
+def count_liss_locked_purchases(account_name: str) -> int:
+    """Return total quantity of purchases with a hold from 0 to 7 days inclusive."""
+
+    conn = open_liss_account_db(account_name)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(quantity), 0) AS locked_qty
+        FROM purchases
+        WHERE hold_days BETWEEN 0 AND 7
+        """
+    )
+    row = cur.fetchone()
+    close_liss_account_db(conn)
+    try:
+        return int(row["locked_qty"])
+    except Exception:
+        return 0
+
+
 # ---------- Weighted statistics ----------
 
 def weighted_mean(values: List[float], weights: List[float]) -> float:
