@@ -293,6 +293,104 @@ def get_liss_limits(item_name: str, account_name: str) -> Optional[Dict[str, Any
     return dict(row) if row else None
 
 
+def _normalize_liss_limits_state(
+    limits: Optional[Dict[str, Any]], now: datetime
+) -> Tuple[datetime, int, datetime, float, bool, bool]:
+    qty_start_dt = now
+    sum_start_dt = now
+    qty_in_period = 0
+    sum_in_period = 0.0
+
+    if limits:
+        try:
+            qty_start_dt = datetime.fromisoformat(limits.get("qty_period_start") or "")
+        except Exception:
+            qty_start_dt = now
+        try:
+            sum_start_dt = datetime.fromisoformat(limits.get("sum_period_start") or "")
+        except Exception:
+            sum_start_dt = now
+        qty_in_period = int(limits.get("qty_in_period") or 0)
+        sum_in_period = float(limits.get("sum_in_period") or 0.0)
+
+    qty_period = timedelta(days=config.LISS_QTY_LIMIT_PERIOD_DAYS)
+    sum_period = timedelta(days=config.LISS_SUM_LIMIT_PERIOD_DAYS)
+
+    qty_reset = now > qty_start_dt + qty_period
+    sum_reset = now > sum_start_dt + sum_period
+
+    if qty_reset:
+        qty_start_dt = now
+        qty_in_period = 0
+
+    if sum_reset:
+        sum_start_dt = now
+        sum_in_period = 0.0
+
+    return qty_start_dt, qty_in_period, sum_start_dt, sum_in_period, qty_reset, sum_reset
+
+
+def _save_liss_limits_state(
+    item_name: str,
+    account_name: str,
+    qty_start_dt: datetime,
+    qty_in_period: int,
+    sum_start_dt: datetime,
+    sum_in_period: float,
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO liss_item_limits(item_name, account_name, qty_period_start, qty_in_period,
+                                     sum_period_start, sum_in_period)
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(item_name, account_name) DO UPDATE SET
+            qty_period_start = excluded.qty_period_start,
+            qty_in_period    = excluded.qty_in_period,
+            sum_period_start = excluded.sum_period_start,
+            sum_in_period    = excluded.sum_in_period
+        """,
+        (
+            item_name,
+            account_name,
+            qty_start_dt.isoformat(timespec="seconds"),
+            qty_in_period,
+            sum_start_dt.isoformat(timespec="seconds"),
+            sum_in_period,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def calculate_remaining_liss_limits(
+    item_name: str, account_name: str, avg_sales: float, now: Optional[datetime] = None
+) -> Tuple[float, float]:
+    now_dt = now or datetime.utcnow()
+    limits = get_liss_limits(item_name, account_name)
+
+    qty_start_dt, qty_in_period, sum_start_dt, sum_in_period, qty_reset, sum_reset = (
+        _normalize_liss_limits_state(limits, now_dt)
+    )
+
+    if limits is None or qty_reset or sum_reset:
+        _save_liss_limits_state(
+            item_name,
+            account_name,
+            qty_start_dt,
+            qty_in_period,
+            sum_start_dt,
+            sum_in_period,
+        )
+
+    max_qty_in_period = config.LISS_MAX_QTY_PERCENT_OF_WEEKLY * avg_sales
+    remaining_qty = max(0.0, max_qty_in_period - qty_in_period)
+    remaining_sum = max(0.0, config.LISS_MAX_SUM_PER_ITEM_USD - sum_in_period)
+
+    return remaining_qty, remaining_sum
+
+
 def reset_liss_limits(item_name: str, account_name: str, now: datetime) -> None:
     now_iso = now.isoformat(timespec="seconds")
     conn = get_conn()
@@ -321,64 +419,19 @@ def update_liss_limits_after_purchase(
     added_qty: int,
     added_sum: float,
 ) -> None:
-    limits = get_liss_limits(item_name, account_name)
     now_dt = now
+    limits = get_liss_limits(item_name, account_name)
 
-    qty_start_dt = now_dt
-    sum_start_dt = now_dt
-    qty_in_period = 0
-    sum_in_period = 0.0
-
-    if limits:
-        try:
-            qty_start_dt = datetime.fromisoformat(limits.get("qty_period_start") or "")
-        except Exception:
-            qty_start_dt = now_dt
-        try:
-            sum_start_dt = datetime.fromisoformat(limits.get("sum_period_start") or "")
-        except Exception:
-            sum_start_dt = now_dt
-        qty_in_period = int(limits.get("qty_in_period") or 0)
-        sum_in_period = float(limits.get("sum_in_period") or 0.0)
-
-    qty_period = timedelta(days=config.LISS_QTY_LIMIT_PERIOD_DAYS)
-    sum_period = timedelta(days=config.LISS_SUM_LIMIT_PERIOD_DAYS)
-
-    if now_dt > qty_start_dt + qty_period:
-        qty_start_dt = now_dt
-        qty_in_period = 0
-
-    if now_dt > sum_start_dt + sum_period:
-        sum_start_dt = now_dt
-        sum_in_period = 0.0
+    qty_start_dt, qty_in_period, sum_start_dt, sum_in_period, _, _ = _normalize_liss_limits_state(
+        limits, now_dt
+    )
 
     qty_in_period += added_qty
     sum_in_period += added_sum
 
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO liss_item_limits(item_name, account_name, qty_period_start, qty_in_period,
-                                     sum_period_start, sum_in_period)
-        VALUES(?,?,?,?,?,?)
-        ON CONFLICT(item_name, account_name) DO UPDATE SET
-            qty_period_start = excluded.qty_period_start,
-            qty_in_period    = excluded.qty_in_period,
-            sum_period_start = excluded.sum_period_start,
-            sum_in_period    = excluded.sum_in_period
-        """,
-        (
-            item_name,
-            account_name,
-            qty_start_dt.isoformat(timespec="seconds"),
-            qty_in_period,
-            sum_start_dt.isoformat(timespec="seconds"),
-            sum_in_period,
-        ),
+    _save_liss_limits_state(
+        item_name, account_name, qty_start_dt, qty_in_period, sum_start_dt, sum_in_period
     )
-    conn.commit()
-    conn.close()
 
 
 def _get_liss_db_path(account_name: str) -> str:
