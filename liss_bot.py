@@ -633,36 +633,38 @@ async def _websocket_consumer(
             candidate_lot: Optional[Dict[str, Any]] = None
 
             async with state_lock:
+                prev_best = _pick_cheapest_lot(current_items.get(key, []))
+                prev_best_price = _lot_price(prev_best)
+
                 if event_type == "obtained_skin_deleted":
-                    if lot_id is None:
-                        continue
-                    _remove_lot_from_state(current_items, key, lot_id)
-                    continue
+                    if lot_id is not None:
+                        _remove_lot_from_state(current_items, key, lot_id)
+                    new_best = _pick_cheapest_lot(current_items.get(key, []))
+                else:
+                    if lot_price is None:
+                        new_best = None
+                    elif not _lot_passes_basic_filters(
+                        steam_market_name, game_code, lot_price, hold_days
+                    ):
+                        new_best = None
+                    else:
+                        lot = {
+                            "steam_market_name": steam_market_name,
+                            "game_code": game_code,
+                            "lis_item_id": lot_id or event.get("id") or "",
+                            "price_usd": float(lot_price),
+                            "hold_days": hold_days,
+                            "raw": event,
+                        }
 
-                if lot_price is None:
-                    continue
-                if not _lot_passes_basic_filters(
-                    steam_market_name, game_code, lot_price, hold_days
-                ):
-                    continue
+                        _store_lot_in_state(current_items, lot)
+                        new_best = _pick_cheapest_lot(current_items.get(key, []))
 
-                current_best = _pick_cheapest_lot(current_items.get(key, []))
-                current_best_price = _lot_price(current_best) if current_best else math.inf
-                is_cheapest = lot_price < current_best_price
+                new_best_price = _lot_price(new_best) if new_best else None
 
-                lot = {
-                    "steam_market_name": steam_market_name,
-                    "game_code": game_code,
-                    "lis_item_id": lot_id or event.get("id") or "",
-                    "price_usd": float(lot_price),
-                    "hold_days": hold_days,
-                    "raw": event,
-                }
-
-                _store_lot_in_state(current_items, lot)
-
-                if is_cheapest:
-                    candidate_lot = lot
+                if new_best is not None and new_best_price is not None:
+                    if prev_best is None or prev_best_price is None or new_best_price < prev_best_price:
+                        candidate_lot = new_best
 
             if candidate_lot:
                 is_recent = (loop.time() - event.get("received_ts", loop.time())) <= config.LISS_WS_PRIORITY_WINDOW_SEC
