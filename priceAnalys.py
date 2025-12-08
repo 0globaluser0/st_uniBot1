@@ -9,7 +9,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import requests
 
@@ -2285,6 +2285,13 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         }
 
     item_name = unquote(item_encoded)
+    return analyse_item(item_name=item_name, game_code=game_code, source_url=url)
+
+
+def analyse_item(item_name: str, game_code: int, source_url: Optional[str] = None) -> Dict[str, Any]:
+    """Синхронный анализ предмета по его имени и коду игры."""
+
+    ensure_directories()
 
     if game_code == 570:
         return {
@@ -2292,6 +2299,17 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             "message": "dota soon",
             "item_name": item_name,
         }
+
+    if game_code not in (730, 570):
+        return {
+            "status": "invalid_link",
+            "message": "unsupported game",
+            "item_name": item_name,
+        }
+
+    url = source_url or (
+        f"https://steamcommunity.com/market/listings/{game_code}/{quote(item_name)}"
+    )
 
     # --- Проверяем кэш ---
     row = get_cached_item(item_name)
