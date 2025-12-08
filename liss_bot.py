@@ -263,10 +263,19 @@ def _select_profitable_lots(
     lis_item_id: str,
     rec_price: float,
     avg_sales: float,
+    account_name: str,
     fallback_price: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
+    now_dt = datetime.utcnow()
     steam_net_price = rec_price * 0.8697
-    allowed_qty = max(1, math.floor(avg_sales * config.LISS_MAX_QTY_PERCENT_OF_WEEKLY))
+
+    remaining_qty, remaining_sum = priceAnalys.calculate_remaining_liss_limits(
+        steam_market_name, account_name, avg_sales, now_dt
+    )
+
+    allowed_qty = math.floor(remaining_qty)
+    if allowed_qty <= 0 or remaining_sum <= 0:
+        return [], 0.0
 
     profitable_lots: List[Dict[str, Any]] = []
     for lot in lots:
@@ -295,13 +304,37 @@ def _select_profitable_lots(
     if not profitable_lots:
         return [], 0.0
 
-    profitable_lots.sort(key=lambda x: x.get("price_usd", 0))
-    selected_lots = profitable_lots[:allowed_qty]
-    profit_estimate = sum(
-        (steam_net_price - float(l.get("price_usd", 0))) * int(l.get("quantity", 1))
-        for l in selected_lots
-    )
+    profitable_lots.sort(key=lambda x: (x.get("price_usd", 0), x.get("hold_days", 0)))
+
+    selected_lots: List[Dict[str, Any]] = []
+    total_qty = 0
+    total_sum = 0.0
+    profit_estimate = 0.0
+
+    for lot in profitable_lots:
+        quantity = int(lot.get("quantity", 1))
+        lot_price = float(lot.get("price_usd", 0))
+        lot_sum = lot_price * quantity
+
+        if total_qty + quantity > allowed_qty:
+            continue
+        if total_sum + lot_sum > remaining_sum:
+            continue
+
+        selected_lots.append(lot)
+        total_qty += quantity
+        total_sum += lot_sum
+        profit_estimate += (steam_net_price - lot_price) * quantity
+
     return selected_lots, profit_estimate
+
+
+def _estimate_profit(lots: Iterable[Dict[str, Any]], rec_price: float) -> float:
+    steam_net_price = rec_price * 0.8697
+    return sum(
+        (steam_net_price - float(l.get("price_usd", 0))) * int(l.get("quantity", 1))
+        for l in lots
+    )
 
 
 async def _queue_steam_parse(item: ItemForSteamParse, high_priority: bool) -> None:
@@ -351,15 +384,12 @@ async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
                 item.lis_item_id,
                 rec_price,
                 avg_sales,
+                account_name,
                 fallback_price=item.current_lis_price,
             )
 
             selected_lots = _filter_available_lots(selected_lots, account_name)
-            profit_estimate = sum(
-                (rec_price * 0.8697 - float(l.get("price_usd", 0)))
-                * int(l.get("quantity", 1))
-                for l in selected_lots
-            )
+            profit_estimate = _estimate_profit(selected_lots, rec_price)
 
             if not selected_lots:
                 print(
@@ -499,14 +529,19 @@ def _lot_passes_basic_filters(
 
 
 def _pick_cheapest_lot(lots: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    cheapest: Optional[Tuple[float, Dict[str, Any]]] = None
+    cheapest: Optional[Tuple[float, int, Dict[str, Any]]] = None
     for lot in lots:
         lot_price = _extract_lot_price(lot, math.inf)
         if lot_price is None:
             continue
-        if cheapest is None or lot_price < cheapest[0]:
-            cheapest = (lot_price, lot)
-    return cheapest[1] if cheapest else None
+        hold_days = _extract_lot_hold_days(lot)
+        if hold_days > config.LISS_MAX_HOLD_DAYS:
+            continue
+        if cheapest is None or lot_price < cheapest[0] or (
+            lot_price == cheapest[0] and hold_days < cheapest[1]
+        ):
+            cheapest = (lot_price, hold_days, lot)
+    return cheapest[2] if cheapest else None
 
 
 def _lot_price(lot: Dict[str, Any]) -> Optional[float]:
@@ -582,14 +617,12 @@ async def _handle_candidate_lot(
             str(lot.get("lis_item_id") or lot.get("id") or ""),
             rec_price,
             avg_sales,
+            account_name,
             fallback_price=lot_price,
         )
 
         selected_lots = _filter_available_lots(selected_lots, account_name)
-        profit_estimate = sum(
-            (rec_price * 0.8697 - float(l.get("price_usd", 0))) * int(l.get("quantity", 1))
-            for l in selected_lots
-        )
+        profit_estimate = _estimate_profit(selected_lots, rec_price)
 
         if selected_lots:
             purchase_request = PurchaseRequest(
