@@ -39,6 +39,8 @@ steam_parse_queue: asyncio.PriorityQueue[Tuple[int, int, ItemForSteamParse]] = (
 )
 liss_buy_queue: asyncio.Queue[PurchaseRequest] = asyncio.Queue()
 _steam_parse_seq = itertools.count()
+_last_high_priority_ts = 0.0
+_high_priority_group = 0
 
 
 def _extract_lot_price(lot: Dict[str, Any], fallback: Optional[float]) -> Optional[float]:
@@ -214,7 +216,20 @@ def _select_profitable_lots(
 
 
 async def _queue_steam_parse(item: ItemForSteamParse, high_priority: bool) -> None:
-    priority = 0 if high_priority else 1
+    global _last_high_priority_ts, _high_priority_group
+
+    loop = asyncio.get_running_loop()
+    priority: int
+
+    if high_priority:
+        now = loop.time()
+        if now - _last_high_priority_ts > config.LISS_WS_PRIORITY_WINDOW_SEC:
+            _high_priority_group -= 1
+        priority = _high_priority_group
+        _last_high_priority_ts = now
+    else:
+        priority = 1
+
     seq = next(_steam_parse_seq)
     await steam_parse_queue.put((priority, seq, item))
 
@@ -390,6 +405,47 @@ def _lot_price(lot: Dict[str, Any]) -> Optional[float]:
     return _extract_lot_price(lot, None) if lot is not None else None
 
 
+def _store_lot_in_state(
+    current_items: Dict[Tuple[int, str], List[Dict[str, Any]]],
+    lot: Dict[str, Any],
+) -> None:
+    key = (int(lot.get("game_code") or 0), lot.get("steam_market_name") or lot.get("name"))
+    if key[1] is None:
+        return
+
+    lots = current_items.setdefault(key, [])
+    lot_id = _lot_id(lot)
+
+    if lot_id is None:
+        lots.append(lot)
+        return
+
+    for idx, existing in enumerate(lots):
+        if _lot_id(existing) == lot_id:
+            lots[idx] = lot
+            break
+    else:
+        lots.append(lot)
+
+
+def _remove_lot_from_state(
+    current_items: Dict[Tuple[int, str], List[Dict[str, Any]]], key: Tuple[int, str], lot_id: str
+) -> bool:
+    lots = current_items.get(key)
+    if not lots:
+        return False
+
+    new_lots = [lot for lot in lots if _lot_id(lot) != lot_id]
+    if len(new_lots) == len(lots):
+        return False
+
+    if new_lots:
+        current_items[key] = new_lots
+    else:
+        current_items.pop(key, None)
+    return True
+
+
 async def _handle_candidate_lot(
     lot: Dict[str, Any],
     account_name: str,
@@ -452,6 +508,19 @@ async def _process_initial_json_snapshot(
     account_name: str,
     session: Any,
 ) -> Dict[Tuple[int, str], List[Dict[str, Any]]]:
+    current_items = await _load_current_market_state(session)
+
+    for (game_code, steam_market_name), lots in current_items.items():
+        best_lot = _pick_cheapest_lot(lots)
+        if best_lot is None:
+            continue
+        await _handle_candidate_lot(best_lot, account_name)
+
+    print("[INIT] Начальный JSON обработан, переходим в режим WebSocket")
+    return current_items
+
+
+async def _load_current_market_state(session: Any) -> Dict[Tuple[int, str], List[Dict[str, Any]]]:
     enabled_games = []
     if config.LISS_ENABLE_CS2:
         enabled_games.append(730)
@@ -489,32 +558,66 @@ async def _process_initial_json_snapshot(
             ):
                 continue
 
-            key = (lot["game_code"], steam_market_name)
-            current_items.setdefault(key, []).append(lot)
+            _store_lot_in_state(current_items, lot)
 
     await asyncio.gather(*(_load_game(game) for game in enabled_games))
-
-    for (game_code, steam_market_name), lots in current_items.items():
-        best_lot = _pick_cheapest_lot(lots)
-        if best_lot is None:
-            continue
-        await _handle_candidate_lot(best_lot, account_name)
-        current_items[(game_code, steam_market_name)] = [best_lot]
-
-    print("[INIT] Начальный JSON обработан, переходим в режим WebSocket")
     return current_items
+
+
+async def _periodic_resync_state(
+    account_name: str,
+    session: Any,
+    current_items: Dict[Tuple[int, str], List[Dict[str, Any]]],
+    state_lock: asyncio.Lock,
+) -> None:
+    if config.LISS_JSON_RESYNC_MINUTES <= 0:
+        return
+
+    interval = config.LISS_JSON_RESYNC_MINUTES * 60
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            snapshot = await _load_current_market_state(session)
+        except Exception as e:
+            print(f"[RESYNC] Ошибка загрузки снапшота: {e}")
+            continue
+
+        candidates: List[Dict[str, Any]] = []
+
+        async with state_lock:
+            # удаляем исчезнувшие предметы
+            for key in list(current_items.keys()):
+                if key not in snapshot:
+                    current_items.pop(key, None)
+
+            for key, new_lots in snapshot.items():
+                prev_best = _pick_cheapest_lot(current_items.get(key, []))
+                new_best = _pick_cheapest_lot(new_lots)
+                current_items[key] = new_lots
+
+                prev_price = _lot_price(prev_best) if prev_best else math.inf
+                new_price = _lot_price(new_best) if new_best else None
+
+                if new_best is not None and new_price is not None and new_price < prev_price:
+                    candidates.append(new_best)
+
+        for lot in candidates:
+            await _handle_candidate_lot(lot, account_name)
 
 
 async def _websocket_consumer(
     account_name: str,
     ws_queue: asyncio.Queue,
     current_items: Dict[Tuple[int, str], List[Dict[str, Any]]],
+    state_lock: asyncio.Lock,
 ) -> None:
     loop = asyncio.get_running_loop()
 
     while True:
         event = await ws_queue.get()
         try:
+            event_type = (event.get("event") or "").strip()
             steam_market_name = event.get("steam_market_name")
             game_code = int(event.get("game_code") or 0)
             try:
@@ -522,32 +625,48 @@ async def _websocket_consumer(
             except (TypeError, ValueError):
                 lot_price = None
             hold_days = _extract_lot_hold_days(event)
-
-            if steam_market_name is None or lot_price is None:
-                continue
-            if not _lot_passes_basic_filters(steam_market_name, game_code, lot_price, hold_days):
+            lot_id = _lot_id(event)
+            if steam_market_name is None:
                 continue
 
             key = (game_code, steam_market_name)
-            current_best = _pick_cheapest_lot(current_items.get(key, []))
-            current_best_price = _lot_price(current_best) if current_best else math.inf
+            candidate_lot: Optional[Dict[str, Any]] = None
 
-            if lot_price >= current_best_price:
-                continue
+            async with state_lock:
+                if event_type == "obtained_skin_deleted":
+                    if lot_id is None:
+                        continue
+                    _remove_lot_from_state(current_items, key, lot_id)
+                    continue
 
-            lot = {
-                "steam_market_name": steam_market_name,
-                "game_code": game_code,
-                "lis_item_id": event.get("lis_item_id") or event.get("id") or "",
-                "price_usd": float(lot_price),
-                "hold_days": hold_days,
-                "raw": event,
-            }
+                if lot_price is None:
+                    continue
+                if not _lot_passes_basic_filters(
+                    steam_market_name, game_code, lot_price, hold_days
+                ):
+                    continue
 
-            current_items[key] = [lot]
+                current_best = _pick_cheapest_lot(current_items.get(key, []))
+                current_best_price = _lot_price(current_best) if current_best else math.inf
+                is_cheapest = lot_price < current_best_price
 
-            is_recent = (loop.time() - event.get("received_ts", loop.time())) <= config.LISS_WS_PRIORITY_WINDOW_SEC
-            await _handle_candidate_lot(lot, account_name, high_priority=is_recent)
+                lot = {
+                    "steam_market_name": steam_market_name,
+                    "game_code": game_code,
+                    "lis_item_id": lot_id or event.get("id") or "",
+                    "price_usd": float(lot_price),
+                    "hold_days": hold_days,
+                    "raw": event,
+                }
+
+                _store_lot_in_state(current_items, lot)
+
+                if is_cheapest:
+                    candidate_lot = lot
+
+            if candidate_lot:
+                is_recent = (loop.time() - event.get("received_ts", loop.time())) <= config.LISS_WS_PRIORITY_WINDOW_SEC
+                await _handle_candidate_lot(candidate_lot, account_name, high_priority=is_recent)
         finally:
             ws_queue.task_done()
 
@@ -571,10 +690,15 @@ async def run_liss_market(account_name: str, api_key: str, session: Any) -> None
     ws_task = asyncio.create_task(ws_client.run())
     ws_consumer_task: Optional[asyncio.Task] = None
 
+    state_lock = asyncio.Lock()
     current_items = await _process_initial_json_snapshot(account_name, session)
     if ws_consumer_task is None:
         ws_consumer_task = asyncio.create_task(
-            _websocket_consumer(account_name, ws_events, current_items)
+            _websocket_consumer(account_name, ws_events, current_items, state_lock)
         )
 
-    await asyncio.gather(ws_task, ws_consumer_task, *buyer_tasks, *parser_tasks)
+    resync_task = asyncio.create_task(
+        _periodic_resync_state(account_name, session, current_items, state_lock)
+    )
+
+    await asyncio.gather(ws_task, ws_consumer_task, resync_task, *buyer_tasks, *parser_tasks)
