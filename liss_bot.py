@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import math
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -13,6 +14,16 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import config
 import priceAnalys
 from liss_api import LissApiClient, LissWebSocketClient, fetch_full_json_for_game
+
+try:  # Optional dependency: prefer httpx, fallback to aiohttp
+    import httpx
+except Exception:  # pragma: no cover - optional dependency
+    httpx = None  # type: ignore
+
+try:
+    import aiohttp
+except Exception:  # pragma: no cover - optional dependency
+    aiohttp = None  # type: ignore
 
 
 @dataclass
@@ -48,6 +59,24 @@ _liss_buy_temp_locks: Dict[Tuple[str, str], float] = {}
 _liss_buy_blacklist: Dict[Tuple[str, str], str] = {}
 _account_price_floor: Dict[str, float] = {}
 _account_locked_qty: Dict[str, int] = {}
+
+
+def _reset_liss_state() -> None:
+    """Очистить очереди и состояния между аккаунтами."""
+
+    global steam_parse_queue, liss_buy_queue, _steam_parse_seq, _last_high_priority_ts, _high_priority_group
+
+    steam_parse_queue = asyncio.PriorityQueue()
+    liss_buy_queue = asyncio.Queue()
+    _steam_parse_seq = itertools.count()
+    _last_high_priority_ts = 0.0
+    _high_priority_group = 0
+
+    _liss_buy_attempts.clear()
+    _liss_buy_temp_locks.clear()
+    _liss_buy_blacklist.clear()
+    _account_price_floor.clear()
+    _account_locked_qty.clear()
 
 
 def _extract_lot_price(lot: Dict[str, Any], fallback: Optional[float]) -> Optional[float]:
@@ -360,11 +389,16 @@ async def _queue_steam_parse(item: ItemForSteamParse, high_priority: bool) -> No
     await steam_parse_queue.put((priority, seq, item))
 
 
-async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
+async def steam_parse_worker(
+    worker_name: str | int, account_name: str, stop_event: asyncio.Event
+) -> None:
     """Воркер, который берёт задачи из steam_parse_queue и шлёт покупки в liss_buy_queue."""
 
-    while True:
-        _, _, item = await steam_parse_queue.get()
+    while not stop_event.is_set():
+        try:
+            _, _, item = await asyncio.wait_for(steam_parse_queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
         try:
             print(f"[STEAM_WORKER {worker_name}] Анализируем {item.steam_market_name}")
             analysis = await asyncio.to_thread(
@@ -421,14 +455,21 @@ async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
             steam_parse_queue.task_done()
 
 
-async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None:
+async def liss_buy_worker(
+    worker_name: str | int, client: LissApiClient, stop_event: asyncio.Event
+) -> None:
     """Воркер, выполняющий покупки через LissApiClient с учётом задержек."""
 
     last_call_ts = 0.0
     loop = asyncio.get_running_loop()
 
-    while True:
-        request: PurchaseRequest = await liss_buy_queue.get()
+    while not stop_event.is_set():
+        try:
+            request: PurchaseRequest = await asyncio.wait_for(
+                liss_buy_queue.get(), timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            continue
         try:
             _cleanup_expired_temp_locks()
             now = loop.time()
@@ -777,14 +818,19 @@ async def _periodic_resync_state(
     session: Any,
     current_items: Dict[Tuple[int, str], List[Dict[str, Any]]],
     state_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
 ) -> None:
     if config.LISS_JSON_RESYNC_MINUTES <= 0:
         return
 
     interval = config.LISS_JSON_RESYNC_MINUTES * 60
 
-    while True:
-        await asyncio.sleep(interval)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
         try:
             snapshot = await _load_current_market_state(account_name, session)
         except Exception as e:
@@ -819,11 +865,15 @@ async def _websocket_consumer(
     ws_queue: asyncio.Queue,
     current_items: Dict[Tuple[int, str], List[Dict[str, Any]]],
     state_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
 ) -> None:
     loop = asyncio.get_running_loop()
 
-    while True:
-        event = await ws_queue.get()
+    while not stop_event.is_set():
+        try:
+            event = await asyncio.wait_for(ws_queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
         try:
             event_type = (event.get("event") or "").strip()
             steam_market_name = event.get("steam_market_name")
@@ -886,7 +936,9 @@ async def _websocket_consumer(
             ws_queue.task_done()
 
 
-async def run_liss_market(account_name: str, api_key: str, session: Any) -> None:
+async def run_liss_market(
+    account_name: str, api_key: str, session: Any, stop_event: asyncio.Event
+) -> None:
     """Основной цикл: стартуем воркеры, загружаем JSON и слушаем WebSocket."""
 
     client = LissApiClient(api_key, account_name, session)
@@ -896,26 +948,162 @@ async def run_liss_market(account_name: str, api_key: str, session: Any) -> None
     await _refresh_account_price_floor(account_name, client)
 
     buyer_tasks = [
-        asyncio.create_task(liss_buy_worker(idx + 1, client))
+        asyncio.create_task(liss_buy_worker(idx + 1, client, stop_event))
         for idx in range(config.LISS_MAX_LISS_BUYERS)
     ]
     parser_tasks = [
-        asyncio.create_task(steam_parse_worker(idx + 1, account_name))
+        asyncio.create_task(steam_parse_worker(idx + 1, account_name, stop_event))
         for idx in range(config.LISS_MAX_STEAM_PARSERS)
     ]
 
     ws_task = asyncio.create_task(ws_client.run())
-    ws_consumer_task: Optional[asyncio.Task] = None
 
     state_lock = asyncio.Lock()
     current_items = await _process_initial_json_snapshot(account_name, session)
-    if ws_consumer_task is None:
-        ws_consumer_task = asyncio.create_task(
-            _websocket_consumer(account_name, ws_events, current_items, state_lock)
-        )
-
-    resync_task = asyncio.create_task(
-        _periodic_resync_state(account_name, session, current_items, state_lock)
+    ws_consumer_task = asyncio.create_task(
+        _websocket_consumer(account_name, ws_events, current_items, state_lock, stop_event)
     )
 
-    await asyncio.gather(ws_task, ws_consumer_task, resync_task, *buyer_tasks, *parser_tasks)
+    resync_task = asyncio.create_task(
+        _periodic_resync_state(account_name, session, current_items, state_lock, stop_event)
+    )
+
+    stop_waiter = asyncio.create_task(stop_event.wait())
+
+    try:
+        done, _ = await asyncio.wait(
+            [stop_waiter, ws_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        if ws_task in done and not stop_event.is_set():
+            exc = ws_task.exception()
+            if exc:
+                print(f"[WS] Работа WebSocket завершилась ошибкой: {exc}")
+            else:
+                print("[WS] Работа WebSocket завершилась без ошибок")
+            stop_event.set()
+
+        await stop_event.wait()
+    finally:
+        stop_event.set()
+        tasks_to_cancel = [
+            ws_task,
+            ws_consumer_task,
+            resync_task,
+            *buyer_tasks,
+            *parser_tasks,
+            stop_waiter,
+        ]
+        for task in tasks_to_cancel:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _create_http_session():
+    """Создать HTTP-сессию для LIS-SKINS (httpx -> aiohttp)."""
+
+    if httpx is not None:
+        async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT) as client:
+            yield client
+        return
+
+    if aiohttp is not None:
+        timeout = aiohttp.ClientTimeout(total=config.HTTP_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            yield session
+        return
+
+    raise RuntimeError("Нужен httpx или aiohttp для работы с LIS-SKINS")
+
+
+def load_liss_accounts(path: Optional[str] = None) -> List[Tuple[str, str]]:
+    """Прочитать файл аккаунтов и вернуть список пар (api_key, account_name)."""
+
+    filename = path or config.LISS_ACCOUNTS_FILE
+    accounts: List[Tuple[str, str]] = []
+
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        print(f"[ACCOUNTS] Файл {filename} не найден")
+        return accounts
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            print(f"[ACCOUNTS] Строка без разделителя ':' пропущена: {line}")
+            continue
+        api_key, account_name = line.split(":", 1)
+        api_key = api_key.strip()
+        account_name = account_name.strip()
+        if not api_key or not account_name:
+            print(f"[ACCOUNTS] Пустой api_key или account_name в строке: {line}")
+            continue
+        accounts.append((api_key, account_name))
+
+    return accounts
+
+
+async def run_for_account(
+    api_key: str, account_name: str, *, run_seconds: Optional[float] = None
+) -> None:
+    """Отработать один аккаунт LIS последовательно и корректно завершить."""
+
+    _reset_liss_state()
+    stop_event = asyncio.Event()
+
+    async with _create_http_session() as session:
+        runner_task = asyncio.create_task(
+            run_liss_market(account_name, api_key, session, stop_event)
+        )
+
+        timer_task: Optional[asyncio.Task] = None
+        wait_tasks = [runner_task]
+
+        if run_seconds is not None and run_seconds > 0:
+            timer_task = asyncio.create_task(asyncio.sleep(run_seconds))
+            wait_tasks.append(timer_task)
+
+        try:
+            done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if runner_task in done:
+                exc = runner_task.exception()
+                if exc:
+                    raise exc
+            if timer_task is not None and timer_task in done:
+                print(
+                    f"[MAIN] Таймер {run_seconds:.0f}с для аккаунта {account_name} истёк, завершаем"
+                )
+        finally:
+            stop_event.set()
+            if timer_task is not None:
+                timer_task.cancel()
+            to_wait = [runner_task]
+            if timer_task is not None:
+                to_wait.append(timer_task)
+            await asyncio.gather(*to_wait, return_exceptions=True)
+
+
+async def main() -> None:
+    accounts = load_liss_accounts()
+    if not accounts:
+        print("[MAIN] Нет аккаунтов для обработки")
+        return
+
+    runtime = config.LISS_ACCOUNT_RUNTIME_SECONDS
+    per_account_seconds = runtime if runtime > 0 else None
+
+    for api_key, account_name in accounts:
+        print(f"[MAIN] Запуск обработки аккаунта {account_name}")
+        try:
+            await run_for_account(api_key, account_name, run_seconds=per_account_seconds)
+        except Exception as e:
+            print(f"[MAIN] Ошибка при обработке {account_name}: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
