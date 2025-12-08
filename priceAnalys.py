@@ -91,6 +91,21 @@ def init_db() -> None:
         """
     )
 
+    # Таблица лимитов покупок по предмету и аккаунту LIS
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS liss_item_limits (
+            item_name        TEXT,
+            account_name     TEXT,
+            qty_period_start TEXT,
+            qty_in_period    INTEGER,
+            sum_period_start TEXT,
+            sum_in_period    REAL,
+            PRIMARY KEY (item_name, account_name)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -257,6 +272,208 @@ def remove_from_blacklist(item_name: str) -> None:
     cur.execute("DELETE FROM blacklist WHERE item_name = ?", (item_name,))
     conn.commit()
     conn.close()
+
+
+# ---------- LIS-SKINS limits & purchases ----------
+
+def get_liss_limits(item_name: str, account_name: str) -> Optional[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT item_name, account_name, qty_period_start, qty_in_period,
+               sum_period_start, sum_in_period
+        FROM liss_item_limits
+        WHERE item_name = ? AND account_name = ?
+        """,
+        (item_name, account_name),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def reset_liss_limits(item_name: str, account_name: str, now: datetime) -> None:
+    now_iso = now.isoformat(timespec="seconds")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO liss_item_limits(item_name, account_name, qty_period_start, qty_in_period,
+                                     sum_period_start, sum_in_period)
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(item_name, account_name) DO UPDATE SET
+            qty_period_start = excluded.qty_period_start,
+            qty_in_period    = excluded.qty_in_period,
+            sum_period_start = excluded.sum_period_start,
+            sum_in_period    = excluded.sum_in_period
+        """,
+        (item_name, account_name, now_iso, 0, now_iso, 0.0),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_liss_limits_after_purchase(
+    item_name: str,
+    account_name: str,
+    now: datetime,
+    added_qty: int,
+    added_sum: float,
+) -> None:
+    limits = get_liss_limits(item_name, account_name)
+    now_dt = now
+
+    qty_start_dt = now_dt
+    sum_start_dt = now_dt
+    qty_in_period = 0
+    sum_in_period = 0.0
+
+    if limits:
+        try:
+            qty_start_dt = datetime.fromisoformat(limits.get("qty_period_start") or "")
+        except Exception:
+            qty_start_dt = now_dt
+        try:
+            sum_start_dt = datetime.fromisoformat(limits.get("sum_period_start") or "")
+        except Exception:
+            sum_start_dt = now_dt
+        qty_in_period = int(limits.get("qty_in_period") or 0)
+        sum_in_period = float(limits.get("sum_in_period") or 0.0)
+
+    qty_period = timedelta(days=config.LISS_QTY_LIMIT_PERIOD_DAYS)
+    sum_period = timedelta(days=config.LISS_SUM_LIMIT_PERIOD_DAYS)
+
+    if now_dt > qty_start_dt + qty_period:
+        qty_start_dt = now_dt
+        qty_in_period = 0
+
+    if now_dt > sum_start_dt + sum_period:
+        sum_start_dt = now_dt
+        sum_in_period = 0.0
+
+    qty_in_period += added_qty
+    sum_in_period += added_sum
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO liss_item_limits(item_name, account_name, qty_period_start, qty_in_period,
+                                     sum_period_start, sum_in_period)
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(item_name, account_name) DO UPDATE SET
+            qty_period_start = excluded.qty_period_start,
+            qty_in_period    = excluded.qty_in_period,
+            sum_period_start = excluded.sum_period_start,
+            sum_in_period    = excluded.sum_in_period
+        """,
+        (
+            item_name,
+            account_name,
+            qty_start_dt.isoformat(timespec="seconds"),
+            qty_in_period,
+            sum_start_dt.isoformat(timespec="seconds"),
+            sum_in_period,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_liss_db_path(account_name: str) -> str:
+    return f"liss_{safe_filename(account_name)}.db"
+
+
+def open_liss_account_db(account_name: str) -> sqlite3.Connection:
+    path = _get_liss_db_path(account_name)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS purchases (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            lis_item_id       TEXT,
+            name              TEXT,
+            steam_market_name TEXT,
+            game_code         INTEGER,
+            buy_price_usd     REAL,
+            rec_price_usd     REAL,
+            quantity          INTEGER,
+            buy_datetime      TEXT,
+            unlock_datetime   TEXT,
+            hold_days         INTEGER,
+            item_asset_id     TEXT,
+            custom_id         TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def close_liss_account_db(conn: sqlite3.Connection) -> None:
+    conn.close()
+
+
+def insert_liss_purchase(
+    account_name: str,
+    lis_item_id: str,
+    name: str,
+    steam_market_name: str,
+    game_code: int,
+    buy_price_usd: float,
+    rec_price_usd: float,
+    quantity: int,
+    buy_datetime: str,
+    unlock_datetime: str,
+    hold_days: int,
+    item_asset_id: str,
+    custom_id: Optional[str] = None,
+) -> None:
+    conn = open_liss_account_db(account_name)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO purchases(
+            lis_item_id, name, steam_market_name, game_code,
+            buy_price_usd, rec_price_usd, quantity, buy_datetime,
+            unlock_datetime, hold_days, item_asset_id, custom_id
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            lis_item_id,
+            name,
+            steam_market_name,
+            game_code,
+            buy_price_usd,
+            rec_price_usd,
+            quantity,
+            buy_datetime,
+            unlock_datetime,
+            hold_days,
+            item_asset_id,
+            custom_id,
+        ),
+    )
+    conn.commit()
+    close_liss_account_db(conn)
+
+
+def fetch_liss_short_hold_purchases(account_name: str) -> List[sqlite3.Row]:
+    conn = open_liss_account_db(account_name)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM purchases
+        WHERE hold_days BETWEEN 0 AND 7
+        """
+    )
+    rows = cur.fetchall()
+    close_liss_account_db(conn)
+    return rows
 
 
 # ---------- Weighted statistics ----------
