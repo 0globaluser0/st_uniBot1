@@ -1,0 +1,332 @@
+"""LIS-SKINS API and WebSocket helpers.
+
+This module provides:
+- ``LissApiClient`` for REST methods using either ``aiohttp.ClientSession``
+  or ``httpx.AsyncClient`` as a transport.
+- ``fetch_full_json_for_game`` to download full price lists in JSON format.
+- ``LissWebSocketClient`` to consume real-time lot events from the Centrifugo
+  backend.
+
+The logic is written without referencing external documentation URLs; request
+and response schemas are embedded below as comments and data-mapping helpers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Dict, Iterable, List, Optional
+
+import config
+
+try:  # Optional imports: the caller controls which client to pass in
+    import aiohttp
+except Exception:  # pragma: no cover - optional dependency
+    aiohttp = None  # type: ignore
+
+try:
+    import httpx
+except Exception:  # pragma: no cover - optional dependency
+    httpx = None  # type: ignore
+
+try:
+    import websockets
+except Exception:  # pragma: no cover - optional dependency
+    websockets = None  # type: ignore
+
+
+class LissApiClient:
+    """Lightweight async client for LIS-SKINS REST API.
+
+    Parameters
+    ----------
+    api_key:
+        Secret token issued for LIS-SKINS account authorization. It is sent in
+        the ``Authorization`` header as a bearer token and duplicated in
+        ``X-Api-Key`` for compatibility.
+    account_name:
+        Alias of the account shown in LIS-SKINS UI; forwarded in the
+        ``X-Account-Name`` header where the backend expects it.
+    session:
+        Either :class:`aiohttp.ClientSession` or :class:`httpx.AsyncClient`.
+    """
+
+    def __init__(self, api_key: str, account_name: str, session: Any):
+        self.api_key = api_key
+        self.account_name = account_name
+        self.session = session
+        self.base_url = config.LISS_API_BASE_URL.rstrip("/")
+
+    def _build_headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "X-Api-Key": self.api_key,
+            "X-Account-Name": self.account_name,
+        }
+
+    @property
+    def _is_aiohttp(self) -> bool:
+        return aiohttp is not None and isinstance(self.session, aiohttp.ClientSession)
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        headers = kwargs.pop("headers", {})
+        headers.update(self._build_headers())
+
+        if self._is_aiohttp:
+            async with self.session.request(method, url, headers=headers, **kwargs) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+        if httpx is not None and isinstance(self.session, httpx.AsyncClient):
+            response = await self.session.request(method, url, headers=headers, **kwargs)
+            response.raise_for_status()
+            return response.json()
+
+        raise TypeError("Unsupported session type; expected aiohttp.ClientSession or httpx.AsyncClient")
+
+    async def get_balance(self) -> float:
+        """Return available balance in USD as a float.
+
+        Expected response envelope examples (both are supported):
+        ``{"balance": 12.34}`` or ``{"data": {"balance": {"available": 12.34}}}``.
+        """
+
+        payload = await self._request("GET", "/account/balance")
+        balance_field = payload.get("balance") or payload.get("data", {}).get("balance")
+
+        if isinstance(balance_field, dict):
+            raw_value = balance_field.get("available") or balance_field.get("amount") or balance_field.get("value")
+        else:
+            raw_value = balance_field
+
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def buy_items(self, items: Iterable[Dict[str, Any]]) -> Any:
+        """Purchase items by unique lot identifiers.
+
+        Parameters
+        ----------
+        items:
+            Iterable of item descriptors (dicts). Each item must include one of
+            the ID fields used by LIS-SKINS market: ``id``/``lot_id``/``item_id``
+            or ``lis_item_id``. Duplicates are removed before sending.
+
+        The request body is ``{"items": [...], "skip_unavailable": true}`` so
+        already-sold lots do not block batch purchases. The raw API response is
+        returned to the caller, typically containing per-lot results with
+        ``purchase_id`` and ``item_asset_id`` keys.
+        """
+
+        unique_items: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        for item in items:
+            lot_id = (
+                item.get("lot_id")
+                or item.get("lis_item_id")
+                or item.get("item_id")
+                or item.get("id")
+                or item.get("custom_id")
+            )
+            if lot_id is None or lot_id in seen_ids:
+                continue
+            seen_ids.add(lot_id)
+            unique_items.append(item)
+
+        body = {"items": unique_items, "skip_unavailable": True}
+        return await self._request("POST", "/market/buy", json=body)
+
+    async def get_purchase_info(self, purchase_id: str) -> Any:
+        """Fetch purchase status and item details by purchase identifier.
+
+        Tries the dedicated ``/market/info`` endpoint first; if the backend
+        returns an empty payload, the fallback is ``/market/history`` with a
+        single record filter. The returned structure is not transformed so the
+        caller can inspect fields such as ``item_asset_id``, ``status`` and
+        unlock timestamp.
+        """
+
+        info = await self._request("GET", "/market/info", params={"purchase_id": purchase_id})
+        if info:
+            return info
+
+        history = await self._request(
+            "GET", "/market/history", params={"purchase_id": purchase_id, "limit": 1}
+        )
+        return history
+
+    async def withdraw_items(
+        self,
+        purchase_ids: Optional[Iterable[str]] = None,
+        custom_ids: Optional[Iterable[str]] = None,
+        partner: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> Any:
+        """Withdraw specific items using ``/market/withdraw``.
+
+        Args mirror the API contract: one of ``purchase_ids`` or ``custom_ids``
+        must be provided; ``partner`` and ``token`` correspond to Steam trade
+        URL components.
+        """
+
+        body: Dict[str, Any] = {}
+        if purchase_ids:
+            body["purchase_ids"] = list(purchase_ids)
+        if custom_ids:
+            body["custom_ids"] = list(custom_ids)
+        if partner:
+            body["partner"] = partner
+        if token:
+            body["token"] = token
+
+        return await self._request("POST", "/market/withdraw", json=body)
+
+    async def withdraw_all(self, partner: Optional[str] = None, token: Optional[str] = None) -> Any:
+        """Withdraw all eligible items with one call to ``/market/withdraw-all``."""
+
+        body: Dict[str, Any] = {}
+        if partner:
+            body["partner"] = partner
+        if token:
+            body["token"] = token
+
+        return await self._request("POST", "/market/withdraw-all", json=body)
+
+
+async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """Download full LIS-SKINS JSON price list for a game.
+
+    Parameters
+    ----------
+    game_code:
+        730 for Counter-Strike 2, 570 for Dota 2.
+    session:
+        Optional ``aiohttp.ClientSession`` or ``httpx.AsyncClient``. If omitted,
+        a temporary :class:`httpx.AsyncClient` is created.
+
+    Returns
+    -------
+    list of dict
+        Normalized list with keys: ``lis_item_id``, ``name``, ``game_code``,
+        ``price_usd``, ``hold``, plus the full raw entry under ``raw``.
+    """
+
+    file_map = {730: "api_csgo_full.json", 570: "api_dota2_full.json"}
+    if game_code not in file_map:
+        raise ValueError(f"Unsupported game code: {game_code}")
+
+    url = f"{config.LISS_JSON_BASE_URL.rstrip('/')}/{file_map[game_code]}"
+
+    async def _download(client: Any) -> Any:
+        headers = {"User-Agent": "liss-client/1.0"}
+        if aiohttp is not None and isinstance(client, aiohttp.ClientSession):
+            async with client.get(url, headers=headers) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+        if httpx is not None and isinstance(client, httpx.AsyncClient):
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        raise TypeError("Unsupported session type; expected aiohttp.ClientSession or httpx.AsyncClient")
+
+    if session is None:
+        if httpx is None:
+            raise RuntimeError("httpx is required when session is not provided")
+        async with httpx.AsyncClient() as client:
+            raw_items = await _download(client)
+    else:
+        raw_items = await _download(session)
+
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_items:
+        lot_id = item.get("id") or item.get("item_id") or item.get("lis_item_id") or item.get("lot_id")
+        hold_value = item.get("hold") or item.get("hold_days") or item.get("unlock_at")
+        price_value = item.get("price_usd") or item.get("price") or item.get("usd_price")
+        name_value = item.get("market_hash_name") or item.get("name")
+        normalized.append(
+            {
+                "lis_item_id": lot_id,
+                "name": name_value,
+                "game_code": item.get("app_id") or item.get("game") or game_code,
+                "price_usd": float(price_value) if price_value is not None else None,
+                "hold": hold_value,
+                "raw": item,
+            }
+        )
+
+    return normalized
+
+
+class LissWebSocketClient:
+    """Centrifugo-based WebSocket consumer for LIS-SKINS events."""
+
+    def __init__(self, api_key: str, queue: asyncio.Queue, url: str = config.LISS_WS_URL):
+        if websockets is None:
+            raise RuntimeError("websockets package is required for LissWebSocketClient")
+        self.api_key = api_key
+        self.url = url
+        self.queue = queue
+        self._msg_id = 0
+        self._ws = None
+
+    async def _send(self, payload: Dict[str, Any]) -> None:
+        self._msg_id += 1
+        payload.setdefault("id", self._msg_id)
+        await self._ws.send(json.dumps(payload))
+
+    async def _handle_message(self, message: Dict[str, Any]) -> None:
+        if message.get("method") != "message":
+            return
+
+        params = message.get("params", {})
+        data = params.get("data") or {}
+        event_type = data.get("event")
+        payload = data.get("payload") or {}
+
+        if event_type not in {
+            "obtained_skin_added",
+            "obtained_skin_deleted",
+            "obtained_skin_price_changed",
+        }:
+            return
+
+        normalized = {
+            "lis_item_id": payload.get("id") or payload.get("lis_item_id") or payload.get("lot_id"),
+            "steam_market_name": payload.get("market_hash_name") or payload.get("name"),
+            "game_code": payload.get("app_id") or payload.get("game"),
+            "price_usd": payload.get("price_usd") or payload.get("price"),
+            "hold_days": payload.get("hold") or payload.get("hold_days"),
+            "is_new_lowest": bool(payload.get("is_lowest_price")),
+            "full_raw": payload,
+        }
+        await self.queue.put(normalized)
+
+    async def _subscribe(self, channels: Iterable[str]) -> None:
+        for channel in channels:
+            await self._send({"method": "subscribe", "params": {"channel": channel}})
+
+    async def run(self, channels: Optional[Iterable[str]] = None) -> None:
+        """Connect, authenticate and stream lot events into the provided queue."""
+
+        if channels is None:
+            channels = [
+                "public:obtained_skin_added",
+                "public:obtained_skin_deleted",
+                "public:obtained_skin_price_changed",
+            ]
+
+        async with websockets.connect(self.url) as ws:
+            self._ws = ws
+            await self._send({"method": "connect", "params": {"token": self.api_key}})
+            await self._subscribe(channels)
+
+            async for raw in ws:  # type: ignore[attr-defined]
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                await self._handle_message(message)
