@@ -202,6 +202,10 @@ BOOST_MIN_RECENT_VOLUME = 50
 LISS_ACCOUNTS_FILE = "liss_accs.txt"
 # формат строк: "<api_key>:<account_name>"
 
+# Сколько секунд обрабатывать один LIS-аккаунт
+# 0 = бесконечно (работает до внешнего завершения)
+LISS_ACCOUNT_RUNTIME_SECONDS = 900
+
 # Базовые URL
 LISS_API_BASE_URL = "https://api.lis-skins.com/v1"
 LISS_JSON_BASE_URL = "https://lis-skins.com/market_export_json"
