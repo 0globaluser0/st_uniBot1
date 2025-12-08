@@ -303,6 +303,10 @@ class LissWebSocketClient:
             "is_new_lowest": bool(payload.get("is_lowest_price")),
             "full_raw": payload,
         }
+        try:
+            normalized["received_ts"] = asyncio.get_running_loop().time()
+        except RuntimeError:
+            normalized["received_ts"] = 0.0
         await self.queue.put(normalized)
 
     async def _subscribe(self, channels: Iterable[str]) -> None:
