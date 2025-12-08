@@ -195,3 +195,66 @@ CRASH_MIN_RATIO = 0.75  # падение на 25% и более
 # Минимальный объём в старой и новой части для надёжного детекта
 BOOST_MIN_OLD_VOLUME = 50
 BOOST_MIN_RECENT_VOLUME = 50
+
+# ------------ LIS-SKINS общие настройки ------------
+
+# Файл с LIS аккаунтами
+LISS_ACCOUNTS_FILE = "liss_accs.txt"
+# формат строк: "<api_key>:<account_name>"
+
+# Базовые URL
+LISS_API_BASE_URL = "https://api.lis-skins.com/v1"
+LISS_JSON_BASE_URL = "https://lis-skins.com/market_export_json"
+LISS_WS_URL = "wss://ws.lis-skins.com"
+
+# Игры для работы (True/False)
+LISS_ENABLE_CS2 = True
+LISS_ENABLE_DOTA2 = True
+
+# Ключевые слова, по которым предмет исключается (в названии LIS)
+LISS_EXCLUDED_KEYWORDS = [
+    "Souvenir",
+    "Graffiti",
+]
+
+# Ограничение цены самого дешёвого лота на LIS-SKINS (USD)
+LISS_MIN_PRICE_USD = 0.10
+LISS_MAX_PRICE_USD = 200.0
+
+# Минимальная доходность (доля, а не %).
+# Формула для лота:
+# profit_ratio = (rec_price * 0.8697 - lis_price) / lis_price
+LISS_MIN_PROFIT_RATIO = 0.10  # например +10%
+
+# Максимальный срок холда предмета в днях
+LISS_MAX_HOLD_DAYS = 7
+
+# Процент от средних недельных продаж на Steam,
+# который можно купить за период
+LISS_MAX_QTY_PERCENT_OF_WEEKLY = 0.30  # 30% от avg_sales
+
+# Длительность периода по количеству (в сутках)
+LISS_QTY_LIMIT_PERIOD_DAYS = 7
+
+# Максимальная сумма покупок одного предмета за период (USD)
+LISS_MAX_SUM_PER_ITEM_USD = 100.0
+
+# Длительность периода по сумме (в сутках)
+LISS_SUM_LIMIT_PERIOD_DAYS = 7
+
+# Задержки между запросами LIS JSON и REST
+LISS_JSON_REQUEST_DELAY = 1.0   # сек между JSON-загрузками
+LISS_API_REQUEST_DELAY = 0.5    # сек между REST-запросами
+
+# Сколько секунд сохраняется повышенный приоритет для новых лотов из WebSocket
+LISS_WS_PRIORITY_WINDOW_SEC = 10
+
+# Кол-во параллельных воркеров:
+LISS_MAX_STEAM_PARSERS = 3
+LISS_MAX_LISS_BUYERS = 2
+
+# Порог "опасного" количества купленных, но ещё залоченных (0-7 дней до разлока)
+LISS_LOCKED_ITEMS_WARNING_THRESHOLD = 800
+
+# Максимальный лимит слотов в инвентаре (обычно 1000)
+LISS_MAX_INVENTORY_SLOTS = 1000
