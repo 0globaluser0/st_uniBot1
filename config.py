@@ -261,3 +261,7 @@ LISS_LOCKED_ITEMS_WARNING_THRESHOLD = 800
 
 # Максимальный лимит слотов в инвентаре (обычно 1000)
 LISS_MAX_INVENTORY_SLOTS = 1000
+
+# Временная блокировка лотов после ошибок и предел попыток повторной покупки
+LISS_BUY_TEMP_LOCK_SECONDS = 30.0
+LISS_BUY_MAX_RETRIES_PER_LOT = 3

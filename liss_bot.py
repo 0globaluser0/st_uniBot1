@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -41,6 +42,10 @@ liss_buy_queue: asyncio.Queue[PurchaseRequest] = asyncio.Queue()
 _steam_parse_seq = itertools.count()
 _last_high_priority_ts = 0.0
 _high_priority_group = 0
+
+_liss_buy_attempts: Dict[Tuple[str, str], int] = {}
+_liss_buy_temp_locks: Dict[Tuple[str, str], float] = {}
+_liss_buy_blacklist: Dict[Tuple[str, str], str] = {}
 
 
 def _extract_lot_price(lot: Dict[str, Any], fallback: Optional[float]) -> Optional[float]:
@@ -101,6 +106,90 @@ def _normalize_purchase_results(payload: Any) -> Dict[str, Dict[str, Any]]:
             continue
         mapping[lot_id] = entry
     return mapping
+
+
+def _make_liss_key(account_name: str, lot: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    lot_id = _lot_id(lot)
+    if lot_id is None:
+        return None
+    return account_name, str(lot_id)
+
+
+def _cleanup_expired_temp_locks(now_ts: Optional[float] = None) -> None:
+    if not _liss_buy_temp_locks:
+        return
+
+    now = now_ts or time.time()
+    expired = [key for key, expires_at in _liss_buy_temp_locks.items() if expires_at <= now]
+    for key in expired:
+        _liss_buy_temp_locks.pop(key, None)
+
+
+def _is_lot_blocked(account_name: str, lot: Dict[str, Any]) -> bool:
+    _cleanup_expired_temp_locks()
+    key = _make_liss_key(account_name, lot)
+    if key is None:
+        return False
+    if key in _liss_buy_blacklist:
+        return True
+    lock_expires_at = _liss_buy_temp_locks.get(key)
+    if lock_expires_at is None:
+        return False
+    if lock_expires_at > time.time():
+        return True
+    _liss_buy_temp_locks.pop(key, None)
+    return False
+
+
+def _filter_available_lots(lots: List[Dict[str, Any]], account_name: str) -> List[Dict[str, Any]]:
+    return [lot for lot in lots if not _is_lot_blocked(account_name, lot)]
+
+
+def _clear_lot_state(key: Optional[Tuple[str, str]]) -> None:
+    if key is None:
+        return
+    _liss_buy_attempts.pop(key, None)
+    _liss_buy_temp_locks.pop(key, None)
+    _liss_buy_blacklist.pop(key, None)
+
+
+def _is_ignorable_buy_error(status: str) -> bool:
+    normalized = status.lower()
+    keywords = [
+        "недоступен",
+        "выкуплен",
+        "куплен",
+        "не существует",
+        "не найден",
+        "price changed",
+        "price has changed",
+        "price_changed",
+        "unavailable",
+        "already purchased",
+        "already bought",
+        "not exist",
+        "not found",
+        "price change",
+    ]
+    return any(k in normalized for k in keywords)
+
+
+def _register_buy_error(key: Optional[Tuple[str, str]], status: str) -> None:
+    if key is None:
+        return
+
+    if _is_ignorable_buy_error(status):
+        return
+
+    attempts = _liss_buy_attempts.get(key, 0) + 1
+    _liss_buy_attempts[key] = attempts
+
+    if attempts >= config.LISS_BUY_MAX_RETRIES_PER_LOT:
+        _liss_buy_blacklist[key] = status
+        _liss_buy_temp_locks.pop(key, None)
+        return
+
+    _liss_buy_temp_locks[key] = time.time() + config.LISS_BUY_TEMP_LOCK_SECONDS
 
 
 def _game_enabled(game_code: int) -> bool:
@@ -265,6 +354,13 @@ async def steam_parse_worker(worker_name: str | int, account_name: str) -> None:
                 fallback_price=item.current_lis_price,
             )
 
+            selected_lots = _filter_available_lots(selected_lots, account_name)
+            profit_estimate = sum(
+                (rec_price * 0.8697 - float(l.get("price_usd", 0)))
+                * int(l.get("quantity", 1))
+                for l in selected_lots
+            )
+
             if not selected_lots:
                 print(
                     f"[STEAM_WORKER {worker_name}] Нет подходящих лотов для {item.steam_market_name}"
@@ -298,6 +394,7 @@ async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None
     while True:
         request: PurchaseRequest = await liss_buy_queue.get()
         try:
+            _cleanup_expired_temp_locks()
             now = loop.time()
             wait_for = config.LISS_API_REQUEST_DELAY - (now - last_call_ts)
             if wait_for > 0:
@@ -313,6 +410,9 @@ async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None
                 last_call_ts = loop.time()
             except Exception as e:
                 print(f"[LISS_WORKER {worker_name}] Ошибка вызова buy_items: {e}")
+                for lot in request.selected_lots:
+                    key = _make_liss_key(request.account_name, lot)
+                    _register_buy_error(key, str(e))
                 continue
 
             results_map = _normalize_purchase_results(response)
@@ -321,12 +421,19 @@ async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None
             for lot in request.selected_lots:
                 lot_id = _lot_id(lot)
                 result_entry = results_map.get(lot_id, {}) if lot_id else {}
+                key = _make_liss_key(request.account_name, lot)
 
                 if not _is_successful_status(result_entry):
-                    status = result_entry.get("status", "unknown")
+                    status = str(
+                        result_entry.get("status")
+                        or result_entry.get("message")
+                        or result_entry.get("error")
+                        or "unknown"
+                    )
                     print(
                         f"[LISS_WORKER {worker_name}] Не удалось купить {lot_id}: status={status}"
                     )
+                    _register_buy_error(key, status)
                     continue
 
                 quantity = int(lot.get("quantity", 1))
@@ -368,6 +475,7 @@ async def liss_buy_worker(worker_name: str | int, client: LissApiClient) -> None
                     )
 
                 status = result_entry.get("status", "ok")
+                _clear_lot_state(key)
                 print(
                     f"[LISS_WORKER {worker_name}] Куплен {request.steam_market_name} lot={lot_id} "
                     f"status={status} price={price_usd} qty={quantity}"
@@ -475,6 +583,12 @@ async def _handle_candidate_lot(
             rec_price,
             avg_sales,
             fallback_price=lot_price,
+        )
+
+        selected_lots = _filter_available_lots(selected_lots, account_name)
+        profit_estimate = sum(
+            (rec_price * 0.8697 - float(l.get("price_usd", 0))) * int(l.get("quantity", 1))
+            for l in selected_lots
         )
 
         if selected_lots:
