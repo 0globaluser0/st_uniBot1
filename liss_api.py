@@ -7,10 +7,6 @@ This module provides:
 - ``LissWebSocketClient`` to consume real-time lot events from the Centrifugo
   backend.
 
-/v1/market/search intentionally is not wrapped here and should be avoided or
-used крайне редко: LIS рекомендует опираться на JSON-прайсы и WebSocket,
-а новые лоты в search приходят с задержкой.
-
 The logic is written without referencing external documentation URLs; request
 and response schemas are embedded below as comments and data-mapping helpers.
 """
@@ -158,33 +154,43 @@ class LissApiClient:
         self,
         game_code: int,
         steam_market_name: str,
-        limit: int = 100,
-        offset: int = 0,
+        *,
+        cursor: str | None = None,
     ) -> Dict[str, Any]:
-        """Вызов метода поиска скинов (доступных к покупке).
+        """Вызов метода ``/v1/market/search`` с актуальными требованиями LIS.
 
         Parameters
         ----------
         game_code:
-            730 или 570.
+            730 или 570. Для API конвертируется в строковое значение ("csgo" / "dota2").
         steam_market_name:
-            Строка market name (как в Steam).
-        limit, offset:
-            Параметры пагинации.
+            Полное название предмета как в Steam. Передаётся в ``names[]``.
+        cursor:
+            Курсор пагинации, возвращаемый в ``meta.next_cursor``.
 
         Returns
         -------
         dict
-            Raw JSON словарь, который может содержать поля ``items`` / ``skins`` /
-            ``results`` с лотами и флаги пагинации ``has_more`` / ``next_offset``.
+            Raw JSON словарь от LIS.
         """
 
+        game_param = "csgo" if game_code == 730 else "dota2" if game_code == 570 else str(game_code)
+        unlock_days = list(range(0, max(int(config.LISS_MAX_HOLD_DAYS), 0) + 1))
+        only_unlocked = 0 if config.LISS_MAX_HOLD_DAYS > 0 else 1
+
         payload = {
-            "game": game_code,
-            "search": steam_market_name,
-            "limit": limit,
-            "offset": offset,
+            "game": game_param,
+            "names": [steam_market_name],
+            "only_unlocked": only_unlocked,
+            "price_from": config.LISS_MIN_PRICE_USD,
+            "price_to": config.LISS_MAX_PRICE_USD,
+            "sort_by": "lowest_price",
+            "unlock_days": unlock_days,
         }
+
+        if cursor:
+            payload["cursor"] = cursor
+
         return await self._request("POST", "/market/search", json=payload)
 
     async def get_balance(self) -> float:
