@@ -627,11 +627,11 @@ def _lot_passes_basic_filters(
 ) -> Tuple[bool, Optional[str]]:
     if not _game_enabled(game_code):
         return False, "game_disabled"
-    if _contains_excluded_keyword(steam_market_name):
-        return False, "excluded_keyword"
     effective_min_price = min_price_usd if min_price_usd is not None else config.LISS_MIN_PRICE_USD
     if not _price_in_range(price_usd, effective_min_price):
         return False, "price_out_of_range"
+    if _contains_excluded_keyword(steam_market_name):
+        return False, "excluded_keyword"
     if hold_days > config.LISS_MAX_HOLD_DAYS:
         return False, "hold_too_long"
     return True, None
@@ -840,62 +840,69 @@ async def _load_current_market_state(
 
     async def _load_game(game_code: int) -> None:
         raw_items = await fetch_full_json_for_game(game_code, session=session)
-        total_lots = 0
-        skipped_lots = 0
-        passed_lots = 0
+        total_items = 0
+        skipped_items = 0
+        passed_items = 0
 
         for entry in raw_items:
             if not isinstance(entry, dict):
                 continue
 
-            steam_market_name = entry.get("market_hash_name") or entry.get("name") or entry.get("steam_market_name")
+            steam_market_name = entry.get("steam_market_name") or entry.get("name")
             if not steam_market_name:
                 continue
 
             try:
-                lot_price = float(entry.get("price_usd") or entry.get("price") or entry.get("usd_price"))
+                price = float(entry.get("price_usd"))
             except (TypeError, ValueError):
                 continue
 
             hold_days = _extract_lot_hold_days(entry)
-            total_lots += 1
+            total_items += 1
 
-            if total_lots % 10000 == 0:
+            if total_items % 10000 == 0:
                 logger.info(
                     "[FILTER_PROGRESS] account=%s game=%s processed=%d",
                     account_name,
                     game_code,
-                    total_lots,
+                    total_items,
                 )
 
             passes_filters, reason = _lot_passes_basic_filters(
                 steam_market_name,
                 int(entry.get("app_id") or entry.get("game_code") or game_code),
-                lot_price,
+                price,
                 hold_days,
                 min_price_usd=effective_min_price,
             )
             if not passes_filters:
-                skipped_lots += 1
+                skipped_items += 1
                 continue
 
-            passed_lots += 1
-            lot = {
+            passed_items += 1
+            try:
+                count = int(entry.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+
+            pseudo_lot = {
                 "steam_market_name": steam_market_name,
+                "name": steam_market_name,
                 "game_code": int(entry.get("app_id") or entry.get("game_code") or game_code),
-                "lis_item_id": entry.get("lis_item_id") or entry.get("id") or entry.get("item_id") or "",
-                "price_usd": lot_price,
+                "price_usd": price,
+                "count": count,
                 "hold_days": hold_days,
+                "raw": entry,
             }
-            _store_lot_in_state(current_items, lot)
+            _store_lot_in_state(current_items, pseudo_lot)
 
         logger.info(
-            "[FILTER_SUMMARY] account=%s game=%s total_lots=%d passed=%d skipped=%d",
+            "[FILTER_SUMMARY] account=%s game=%s total_items=%d passed=%d skipped=%d",
             account_name,
             game_code,
-            total_lots,
-            passed_lots,
-            skipped_lots,
+            total_items,
+            passed_items,
+            skipped_items,
         )
 
     start = time.perf_counter()

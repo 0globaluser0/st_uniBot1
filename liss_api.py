@@ -278,7 +278,7 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
         Raw list of entries returned by LIS, without additional normalization.
     """
 
-    file_map = {730: "api_csgo_full.json", 570: "api_dota2_full.json"}
+    file_map = {730: "csgo.json", 570: "dota2.json"}
     if game_code not in file_map:
         raise ValueError(f"Unsupported game code: {game_code}")
 
@@ -305,10 +305,8 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
         raw = await _download(session)
 
     if isinstance(raw, dict):
-        # Стандартный случай: {"status": "success", "items": [ ... ]}
         raw_items = raw.get("items") or []
     elif isinstance(raw, list):
-        # На всякий случай, если верхний уровень сразу список
         raw_items = raw
     else:
         logger.error("[JSON] Неожиданный формат JSON: %r", type(raw))
@@ -316,7 +314,37 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
 
     _save_full_json_snapshot(raw_items, game_code)
 
-    return raw_items
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        price_value = item.get("price")
+        if name is None or price_value is None:
+            continue
+
+        try:
+            price_usd = float(price_value)
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            count = int(item.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+
+        normalized.append(
+            {
+                "name": name,
+                "steam_market_name": name,
+                "game_code": game_code,
+                "price_usd": price_usd,
+                "count": count,
+                "raw": item,
+            }
+        )
+
+    return normalized
 
 
 class LissWebSocketClient:
