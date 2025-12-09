@@ -840,44 +840,37 @@ async def _load_current_market_state(
 
     async def _load_game(game_code: int) -> None:
         raw_items = await fetch_full_json_for_game(game_code, session=session)
-        normalized: List[Dict[str, Any]] = []
-        for entry in raw_items:
-            steam_market_name = entry.get("name") or entry.get("steam_market_name")
-            if not steam_market_name:
-                continue
-
-            try:
-                lot_price = float(entry.get("price_usd"))
-            except (TypeError, ValueError):
-                continue
-            hold_days = _extract_lot_hold_days(entry)
-            if lot_price is None:
-                continue
-
-            lot = {
-                "steam_market_name": steam_market_name,
-                "game_code": int(entry.get("game_code") or game_code),
-                "lis_item_id": entry.get("lis_item_id") or entry.get("id") or "",
-                "price_usd": lot_price,
-                "hold_days": hold_days,
-                "raw": entry.get("raw") or entry,
-            }
-            normalized.append(lot)
-
         total_lots = 0
         skipped_lots = 0
         passed_lots = 0
 
-        for lot in normalized:
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+
+            steam_market_name = entry.get("market_hash_name") or entry.get("name") or entry.get("steam_market_name")
+            if not steam_market_name:
+                continue
+
+            try:
+                lot_price = float(entry.get("price_usd") or entry.get("price") or entry.get("usd_price"))
+            except (TypeError, ValueError):
+                continue
+
+            hold_days = _extract_lot_hold_days(entry)
             total_lots += 1
 
-            steam_market_name = lot.get("steam_market_name") or lot.get("name") or ""
-            lot_price = lot.get("price_usd") or 0.0
-            hold_days = lot.get("hold_days") or 0
+            if total_lots % 10000 == 0:
+                logger.info(
+                    "[FILTER_PROGRESS] account=%s game=%s processed=%d",
+                    account_name,
+                    game_code,
+                    total_lots,
+                )
 
             passes_filters, reason = _lot_passes_basic_filters(
                 steam_market_name,
-                lot["game_code"],
+                int(entry.get("app_id") or entry.get("game_code") or game_code),
                 lot_price,
                 hold_days,
                 min_price_usd=effective_min_price,
@@ -887,6 +880,13 @@ async def _load_current_market_state(
                 continue
 
             passed_lots += 1
+            lot = {
+                "steam_market_name": steam_market_name,
+                "game_code": int(entry.get("app_id") or entry.get("game_code") or game_code),
+                "lis_item_id": entry.get("lis_item_id") or entry.get("id") or entry.get("item_id") or "",
+                "price_usd": lot_price,
+                "hold_days": hold_days,
+            }
             _store_lot_in_state(current_items, lot)
 
         logger.info(
