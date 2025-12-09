@@ -320,7 +320,7 @@ def _select_profitable_lots(
     if allowed_qty <= 0 or remaining_sum <= 0:
         return [], 0.0
 
-    profitable_lots: List[Dict[str, Any]] = []
+    candidate_lots: List[Dict[str, Any]] = []
     for lot in lots:
         lot_price = _extract_lot_price(lot, fallback_price or rec_price)
         if lot_price is None:
@@ -331,32 +331,47 @@ def _select_profitable_lots(
         if not _price_in_range(lot_price, effective_min_price):
             continue
 
-        profit_ratio = (steam_net_price - lot_price) / lot_price
-        if profit_ratio < config.LISS_MIN_PROFIT_RATIO:
-            continue
-
         lot_copy = dict(lot)
-        lot_copy.setdefault("price_usd", lot_price)
+        lot_copy.setdefault("price_usd", float(lot_price))
         lot_copy.setdefault("steam_market_name", steam_market_name)
         lot_copy.setdefault("game_code", game_code)
         lot_copy.setdefault("lis_item_id", lis_item_id)
-        lot_copy["profit_ratio"] = profit_ratio
         lot_copy["hold_days"] = hold_days
-        profitable_lots.append(lot_copy)
+        candidate_lots.append(lot_copy)
 
-    if not profitable_lots:
+    if not candidate_lots:
         return [], 0.0
 
-    profitable_lots.sort(key=lambda x: (x.get("price_usd", 0), x.get("hold_days", 0)))
+    candidate_lots.sort(key=lambda x: (x.get("price_usd", 0), x.get("hold_days", 0)))
+
+    first_lot = candidate_lots[0]
+    first_price = float(first_lot.get("price_usd", 0))
+    first_profit_ratio = (steam_net_price - first_price) / first_price
+    if first_profit_ratio < config.LISS_MIN_PROFIT_RATIO:
+        logger.info(
+            "[PROFIT_FILTER] %s (game=%s, acc=%s): cheapest lot is not profitable "
+            "(price=%.2f, profit=%.4f < min=%.4f), skip item",
+            steam_market_name,
+            game_code,
+            account_name,
+            first_price,
+            first_profit_ratio,
+            config.LISS_MIN_PROFIT_RATIO,
+        )
+        return [], 0.0
 
     selected_lots: List[Dict[str, Any]] = []
     total_qty = 0
     total_sum = 0.0
-    profit_estimate = 0.0
 
-    for lot in profitable_lots:
-        quantity = int(lot.get("quantity", 1))
+    for lot in candidate_lots:
         lot_price = float(lot.get("price_usd", 0))
+        profit_ratio = (steam_net_price - lot_price) / lot_price
+        if profit_ratio < config.LISS_MIN_PROFIT_RATIO:
+            continue
+
+        lot["profit_ratio"] = profit_ratio
+        quantity = int(lot.get("quantity", 1))
         lot_sum = lot_price * quantity
 
         if total_qty + quantity > allowed_qty:
@@ -367,9 +382,8 @@ def _select_profitable_lots(
         selected_lots.append(lot)
         total_qty += quantity
         total_sum += lot_sum
-        profit_estimate += (steam_net_price - lot_price) * quantity
 
-    return selected_lots, profit_estimate
+    return selected_lots, total_sum
 
 
 def _estimate_profit(lots: Iterable[Dict[str, Any]], rec_price: float) -> float:
