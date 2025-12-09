@@ -215,6 +215,9 @@ LISS_WS_URL = "wss://ws.lis-skins.com"
 LISS_ENABLE_CS2 = True
 LISS_ENABLE_DOTA2 = True
 
+# Каталог для сохранения полных JSON-снапшотов рынка LIS-SKINS
+LISS_JSON_SNAPSHOT_DIR = "liss_json_snapshots"
+
 # Ключевые слова, по которым предмет исключается (в названии LIS)
 LISS_EXCLUDED_KEYWORDS = [
     "Souvenir",

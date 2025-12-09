@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import config
@@ -241,6 +243,24 @@ class LissApiClient:
         return await self._request("POST", "/market/withdraw-all", json=body)
 
 
+def _save_full_json_snapshot(raw_items: List[Dict[str, Any]], game_code: int) -> None:
+    snapshot_dir = Path(config.LISS_JSON_SNAPSHOT_DIR)
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        game_label = {730: "csgo", 570: "dota2"}.get(game_code, str(game_code))
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = snapshot_dir / f"{game_label}_full_{timestamp}.json"
+
+        with snapshot_path.open("w", encoding="utf-8") as f:
+            json.dump(raw_items, f, ensure_ascii=False)
+
+        logger.info("[JSON] Сохранили снапшот %s (%s лотов)", snapshot_path, len(raw_items))
+    except Exception:
+        logger.exception(
+            "[JSON] Не удалось сохранить JSON снапшот для game_code=%s", game_code
+        )
+
+
 async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None) -> List[Dict[str, Any]]:
     """Download full LIS-SKINS JSON price list for a game.
 
@@ -284,6 +304,8 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
             raw_items = await _download(client)
     else:
         raw_items = await _download(session)
+
+    _save_full_json_snapshot(raw_items, game_code)
 
     normalized: List[Dict[str, Any]] = []
     for item in raw_items:
