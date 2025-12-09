@@ -7,6 +7,10 @@ This module provides:
 - ``LissWebSocketClient`` to consume real-time lot events from the Centrifugo
   backend.
 
+/v1/market/search intentionally is not wrapped here and should be avoided or
+used крайне редко: LIS рекомендует опираться на JSON-прайсы и WebSocket,
+а новые лоты в search приходят с задержкой.
+
 The logic is written without referencing external documentation URLs; request
 and response schemas are embedded below as comments and data-mapping helpers.
 """
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, Iterable, List, Optional
 
 import config
@@ -33,6 +38,9 @@ try:
     import websockets
 except Exception:  # pragma: no cover - optional dependency
     websockets = None  # type: ignore
+
+
+logger = logging.getLogger("liss_api")
 
 
 class LissApiClient:
@@ -73,17 +81,53 @@ class LissApiClient:
         headers = kwargs.pop("headers", {})
         headers.update(self._build_headers())
 
-        if self._is_aiohttp:
-            async with self.session.request(method, url, headers=headers, **kwargs) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+        try:
+            if self._is_aiohttp:
+                async with self.session.request(method, url, headers=headers, **kwargs) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        logger.error(
+                            "[HTTP] %s %s account=%s status=%s body=%s",
+                            method,
+                            url,
+                            self.account_name,
+                            resp.status,
+                            body,
+                        )
+                        if resp.status in {423, 429}:
+                            logger.warning(
+                                "[HTTP] Возможная блокировка LIS (часто не забираешь скины?) account=%s",
+                                self.account_name,
+                            )
+                        resp.raise_for_status()
+                    return await resp.json()
 
-        if httpx is not None and isinstance(self.session, httpx.AsyncClient):
-            response = await self.session.request(method, url, headers=headers, **kwargs)
-            response.raise_for_status()
-            return response.json()
+            if httpx is not None and isinstance(self.session, httpx.AsyncClient):
+                response = await self.session.request(method, url, headers=headers, **kwargs)
+                if response.is_error:
+                    body = response.text
+                    logger.error(
+                        "[HTTP] %s %s account=%s status=%s body=%s",
+                        method,
+                        url,
+                        self.account_name,
+                        response.status_code,
+                        body,
+                    )
+                    if response.status_code in {423, 429}:
+                        logger.warning(
+                            "[HTTP] Возможная блокировка LIS (часто не забираешь скины?) account=%s",
+                            self.account_name,
+                        )
+                    response.raise_for_status()
+                return response.json()
 
-        raise TypeError("Unsupported session type; expected aiohttp.ClientSession or httpx.AsyncClient")
+            raise TypeError("Unsupported session type; expected aiohttp.ClientSession or httpx.AsyncClient")
+        except Exception:
+            logger.exception(
+                "[HTTP] Ошибка при запросе %s %s для account=%s", method, url, self.account_name
+            )
+            raise
 
     async def get_balance(self) -> float:
         """Return available balance in USD as a float.

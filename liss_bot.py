@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import math
 import time
 from contextlib import asynccontextmanager
@@ -14,6 +15,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import config
 import priceAnalys
 from liss_api import LissApiClient, LissWebSocketClient, fetch_full_json_for_game
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("liss_bot")
 
 try:  # Optional dependency: prefer httpx, fallback to aiohttp
     import httpx
@@ -256,9 +264,11 @@ def _is_blacklisted(item_name: str) -> bool:
 
     if expires_at is not None and expires_at > datetime.utcnow():
         reason = bl["reason"] if "reason" in bl.keys() else None
-        print(
-            f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. "
-            f"reason={reason}"
+        logger.info(
+            "[BLACKLIST] %s в блэклисте до %s. reason=%s",
+            item_name,
+            expires_at_str,
+            reason,
         )
         return True
 
@@ -400,15 +410,17 @@ async def steam_parse_worker(
         except asyncio.TimeoutError:
             continue
         try:
-            print(f"[STEAM_WORKER {worker_name}] Анализируем {item.steam_market_name}")
+            logger.info("[STEAM_WORKER %s] Анализируем %s", worker_name, item.steam_market_name)
             analysis = await asyncio.to_thread(
                 priceAnalys.analyse_item, item.steam_market_name, item.game_code
             )
 
             if analysis.get("status") != "ok":
-                print(
-                    f"[STEAM_WORKER {worker_name}] Пропускаем {item.steam_market_name}: "
-                    f"status={analysis.get('status')}"
+                logger.info(
+                    "[STEAM_WORKER %s] Пропускаем %s: status=%s",
+                    worker_name,
+                    item.steam_market_name,
+                    analysis.get("status"),
                 )
                 continue
 
@@ -432,8 +444,10 @@ async def steam_parse_worker(
             profit_estimate = _estimate_profit(selected_lots, rec_price)
 
             if not selected_lots:
-                print(
-                    f"[STEAM_WORKER {worker_name}] Нет подходящих лотов для {item.steam_market_name}"
+                logger.info(
+                    "[STEAM_WORKER %s] Нет подходящих лотов для %s",
+                    worker_name,
+                    item.steam_market_name,
                 )
                 continue
 
@@ -447,9 +461,13 @@ async def steam_parse_worker(
                 profit=profit_estimate,
             )
             await liss_buy_queue.put(purchase_request)
-            print(
-                f"[STEAM_WORKER {worker_name}] Отправлен запрос на покупку {len(selected_lots)} "
-                f"лотов для {item.steam_market_name}, ожидаемая прибыль {profit_estimate:.2f}"
+            logger.info(
+                "[STEAM_WORKER %s] Отправлен запрос на покупку %s лотов для %s, "
+                "ожидаемая прибыль %.2f",
+                worker_name,
+                len(selected_lots),
+                item.steam_market_name,
+                profit_estimate,
             )
         finally:
             steam_parse_queue.task_done()
@@ -477,16 +495,24 @@ async def liss_buy_worker(
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
 
-            print(
-                f"[LISS_WORKER {worker_name}] Покупаем {len(request.selected_lots)} "
-                f"лотов для {request.steam_market_name} (аккаунт {request.account_name})"
+            logger.info(
+                "[LISS_WORKER %s] Покупаем %s лотов для %s (аккаунт %s)",
+                worker_name,
+                len(request.selected_lots),
+                request.steam_market_name,
+                request.account_name,
             )
 
             try:
                 response = await client.buy_items(request.selected_lots)
                 last_call_ts = loop.time()
             except Exception as e:
-                print(f"[LISS_WORKER {worker_name}] Ошибка вызова buy_items: {e}")
+                logger.exception(
+                    "[LISS_WORKER %s] Ошибка вызова buy_items for %s: %s",
+                    worker_name,
+                    request.account_name,
+                    e,
+                )
                 for lot in request.selected_lots:
                     key = _make_liss_key(request.account_name, lot)
                     _register_buy_error(key, str(e))
@@ -507,8 +533,12 @@ async def liss_buy_worker(
                         or result_entry.get("error")
                         or "unknown"
                     )
-                    print(
-                        f"[LISS_WORKER {worker_name}] Не удалось купить {lot_id}: status={status}"
+                    logger.info(
+                        "[LISS_WORKER %s] Не удалось купить %s for %s: status=%s",
+                        worker_name,
+                        lot_id,
+                        request.account_name,
+                        status,
                     )
                     _register_buy_error(key, status)
                     continue
@@ -547,21 +577,29 @@ async def liss_buy_worker(
                         custom_id=lot.get("custom_id") or purchase_id,
                     )
                 except Exception as e:
-                    print(
-                        f"[LISS_WORKER {worker_name}] Ошибка записи покупки в БД для {lot_id}: {e}"
+                    logger.exception(
+                        "[LISS_WORKER %s] Ошибка записи покупки в БД для %s: %s",
+                        worker_name,
+                        lot_id,
+                        e,
                     )
 
                 status = result_entry.get("status", "ok")
                 _clear_lot_state(key)
-                print(
-                    f"[LISS_WORKER {worker_name}] Куплен {request.steam_market_name} lot={lot_id} "
-                    f"status={status} price={price_usd} qty={quantity}"
+                logger.info(
+                    "[LISS_WORKER %s] Куплен %s lot=%s status=%s price=%.2f qty=%s",
+                    worker_name,
+                    request.steam_market_name,
+                    lot_id,
+                    status,
+                    price_usd,
+                    quantity,
                 )
         finally:
             try:
                 await _refresh_account_price_floor(request.account_name, client)
             except Exception as e:
-                print(f"[PRICE_FLOOR] Не удалось обновить порог цены: {e}")
+                logger.exception("[PRICE_FLOOR] Не удалось обновить порог цены: %s", e)
             liss_buy_queue.task_done()
 
 
@@ -572,17 +610,17 @@ def _lot_passes_basic_filters(
     hold_days: int,
     *,
     min_price_usd: Optional[float] = None,
-) -> bool:
+) -> Tuple[bool, Optional[str]]:
     if not _game_enabled(game_code):
-        return False
+        return False, "game_disabled"
     if _contains_excluded_keyword(steam_market_name):
-        return False
+        return False, "excluded_keyword"
     effective_min_price = min_price_usd if min_price_usd is not None else config.LISS_MIN_PRICE_USD
     if not _price_in_range(price_usd, effective_min_price):
-        return False
+        return False, "price_out_of_range"
     if hold_days > config.LISS_MAX_HOLD_DAYS:
-        return False
-    return True
+        return False, "hold_too_long"
+    return True, None
 
 
 def _effective_min_price(account_name: str) -> float:
@@ -599,7 +637,7 @@ async def _refresh_account_price_floor(account_name: str, client: LissApiClient)
         try:
             balance_usd = await client.get_balance()
         except Exception as e:
-            print(f"[PRICE_FLOOR] Не удалось получить баланс {account_name}: {e}")
+            logger.exception("[PRICE_FLOOR] Не удалось получить баланс %s: %s", account_name, e)
             balance_usd = 0.0
 
         free_slots = config.LISS_MAX_INVENTORY_SLOTS - locked_qty
@@ -613,9 +651,11 @@ async def _refresh_account_price_floor(account_name: str, client: LissApiClient)
     _account_price_floor[account_name] = effective_min_price
 
     if previous_price != effective_min_price:
-        print(
-            f"[PRICE_FLOOR] account={account_name} locked_qty={locked_qty} "
-            f"min_price={effective_min_price:.2f}"
+        logger.info(
+            "[PRICE_FLOOR] account=%s locked_qty=%s min_price=%.2f",
+            account_name,
+            locked_qty,
+            effective_min_price,
         )
 
 
@@ -694,9 +734,18 @@ async def _handle_candidate_lot(
     effective_min_price = _effective_min_price(account_name)
     if steam_market_name is None or lot_price is None:
         return
-    if not _lot_passes_basic_filters(
+    passes_filters, reason = _lot_passes_basic_filters(
         steam_market_name, game_code, lot_price, hold_days, min_price_usd=effective_min_price
-    ):
+    )
+    if not passes_filters:
+        logger.info(
+            "[FILTER] account=%s skip=%s price=%.2f hold=%s reason=%s",
+            account_name,
+            steam_market_name,
+            lot_price,
+            hold_days,
+            reason,
+        )
         return
     if _is_blacklisted(steam_market_name):
         return
@@ -730,9 +779,10 @@ async def _handle_candidate_lot(
                 profit=profit_estimate,
             )
             await liss_buy_queue.put(purchase_request)
-            print(
-                f"[CACHE_PURCHASE] Отправлен запрос на покупку {steam_market_name} "
-                f"по кэшу rec_price={rec_price:.2f}"
+            logger.info(
+                "[CACHE_PURCHASE] Отправлен запрос на покупку %s по кэшу rec_price=%.2f",
+                steam_market_name,
+                rec_price,
             )
             return
 
@@ -758,7 +808,7 @@ async def _process_initial_json_snapshot(
             continue
         await _handle_candidate_lot(best_lot, account_name)
 
-    print("[INIT] Начальный JSON обработан, переходим в режим WebSocket")
+    logger.info("[INIT] Начальный JSON обработан, переходим в режим WebSocket")
     return current_items
 
 
@@ -789,6 +839,24 @@ async def _load_current_market_state(
             if lot_price is None:
                 continue
 
+            passes_filters, reason = _lot_passes_basic_filters(
+                steam_market_name,
+                int(entry.get("game_code") or game_code),
+                lot_price,
+                hold_days,
+                min_price_usd=effective_min_price,
+            )
+            if not passes_filters:
+                logger.info(
+                    "[FILTER] account=%s snapshot skip=%s price=%.2f hold=%s reason=%s",
+                    account_name,
+                    steam_market_name,
+                    lot_price,
+                    hold_days,
+                    reason,
+                )
+                continue
+
             lot = {
                 "steam_market_name": steam_market_name,
                 "game_code": int(entry.get("game_code") or game_code),
@@ -798,13 +866,22 @@ async def _load_current_market_state(
                 "raw": entry.get("raw") or entry,
             }
 
-            if not _lot_passes_basic_filters(
+            passes_filters, reason = _lot_passes_basic_filters(
                 steam_market_name,
                 lot["game_code"],
                 lot["price_usd"],
                 hold_days,
                 min_price_usd=effective_min_price,
-            ):
+            )
+            if not passes_filters:
+                logger.info(
+                    "[FILTER] account=%s snapshot skip=%s price=%.2f hold=%s reason=%s",
+                    account_name,
+                    steam_market_name,
+                    lot_price,
+                    hold_days,
+                    reason,
+                )
                 continue
 
             _store_lot_in_state(current_items, lot)
@@ -834,7 +911,7 @@ async def _periodic_resync_state(
         try:
             snapshot = await _load_current_market_state(account_name, session)
         except Exception as e:
-            print(f"[RESYNC] Ошибка загрузки снапшота: {e}")
+            logger.exception("[RESYNC] Ошибка загрузки снапшота: %s", e)
             continue
 
         candidates: List[Dict[str, Any]] = []
@@ -902,26 +979,36 @@ async def _websocket_consumer(
                 else:
                     if lot_price is None:
                         new_best = None
-                    elif not _lot_passes_basic_filters(
-                        steam_market_name,
-                        game_code,
-                        lot_price,
-                        hold_days,
-                        min_price_usd=effective_min_price,
-                    ):
-                        new_best = None
                     else:
-                        lot = {
-                            "steam_market_name": steam_market_name,
-                            "game_code": game_code,
-                            "lis_item_id": lot_id or event.get("id") or "",
-                            "price_usd": float(lot_price),
-                            "hold_days": hold_days,
-                            "raw": event,
-                        }
+                        passes_filters, reason = _lot_passes_basic_filters(
+                            steam_market_name,
+                            game_code,
+                            lot_price,
+                            hold_days,
+                            min_price_usd=effective_min_price,
+                        )
+                        if not passes_filters:
+                            logger.info(
+                                "[FILTER] account=%s ws skip=%s price=%.2f hold=%s reason=%s",
+                                account_name,
+                                steam_market_name,
+                                lot_price,
+                                hold_days,
+                                reason,
+                            )
+                            new_best = None
+                        else:
+                            lot = {
+                                "steam_market_name": steam_market_name,
+                                "game_code": game_code,
+                                "lis_item_id": lot_id or event.get("id") or "",
+                                "price_usd": float(lot_price),
+                                "hold_days": hold_days,
+                                "raw": event,
+                            }
 
-                        _store_lot_in_state(current_items, lot)
-                        new_best = _pick_cheapest_lot(current_items.get(key, []))
+                            _store_lot_in_state(current_items, lot)
+                            new_best = _pick_cheapest_lot(current_items.get(key, []))
 
                 new_best_price = _lot_price(new_best) if new_best else None
 
@@ -977,9 +1064,9 @@ async def run_liss_market(
         if ws_task in done and not stop_event.is_set():
             exc = ws_task.exception()
             if exc:
-                print(f"[WS] Работа WebSocket завершилась ошибкой: {exc}")
+                logger.exception("[WS] Работа WebSocket завершилась ошибкой: %s", exc)
             else:
-                print("[WS] Работа WebSocket завершилась без ошибок")
+                logger.info("[WS] Работа WebSocket завершилась без ошибок")
             stop_event.set()
 
         await stop_event.wait()
@@ -1027,7 +1114,7 @@ def load_liss_accounts(path: Optional[str] = None) -> List[Tuple[str, str]]:
         with open(filename, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except FileNotFoundError:
-        print(f"[ACCOUNTS] Файл {filename} не найден")
+        logger.error("[ACCOUNTS] Файл %s не найден", filename)
         return accounts
 
     for raw_line in lines:
@@ -1035,13 +1122,13 @@ def load_liss_accounts(path: Optional[str] = None) -> List[Tuple[str, str]]:
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            print(f"[ACCOUNTS] Строка без разделителя ':' пропущена: {line}")
+            logger.warning("[ACCOUNTS] Строка без разделителя ':' пропущена: %s", line)
             continue
         api_key, account_name = line.split(":", 1)
         api_key = api_key.strip()
         account_name = account_name.strip()
         if not api_key or not account_name:
-            print(f"[ACCOUNTS] Пустой api_key или account_name в строке: {line}")
+            logger.warning("[ACCOUNTS] Пустой api_key или account_name в строке: %s", line)
             continue
         accounts.append((api_key, account_name))
 
@@ -1055,6 +1142,8 @@ async def run_for_account(
 
     _reset_liss_state()
     stop_event = asyncio.Event()
+
+    logger.info("[ACCOUNT] Старт аккаунта %s", account_name)
 
     async with _create_http_session() as session:
         runner_task = asyncio.create_task(
@@ -1075,8 +1164,10 @@ async def run_for_account(
                 if exc:
                     raise exc
             if timer_task is not None and timer_task in done:
-                print(
-                    f"[MAIN] Таймер {run_seconds:.0f}с для аккаунта {account_name} истёк, завершаем"
+                logger.info(
+                    "[MAIN] Таймер %.0fs для аккаунта %s истёк, завершаем",
+                    run_seconds,
+                    account_name,
                 )
         finally:
             stop_event.set()
@@ -1087,22 +1178,24 @@ async def run_for_account(
                 to_wait.append(timer_task)
             await asyncio.gather(*to_wait, return_exceptions=True)
 
+    logger.info("[ACCOUNT] Остановка аккаунта %s", account_name)
+
 
 async def main() -> None:
     accounts = load_liss_accounts()
     if not accounts:
-        print("[MAIN] Нет аккаунтов для обработки")
+        logger.warning("[MAIN] Нет аккаунтов для обработки")
         return
 
     runtime = config.LISS_ACCOUNT_RUNTIME_SECONDS
     per_account_seconds = runtime if runtime > 0 else None
 
     for api_key, account_name in accounts:
-        print(f"[MAIN] Запуск обработки аккаунта {account_name}")
+        logger.info("[MAIN] Запуск обработки аккаунта %s", account_name)
         try:
             await run_for_account(api_key, account_name, run_seconds=per_account_seconds)
         except Exception as e:
-            print(f"[MAIN] Ошибка при обработке {account_name}: {e}")
+            logger.exception("[MAIN] Ошибка при обработке %s: %s", account_name, e)
 
 
 if __name__ == "__main__":
