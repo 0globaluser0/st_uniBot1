@@ -55,6 +55,10 @@ def get_proxy_conn() -> sqlite3.Connection:
     return conn
 
 
+# Глобальный указатель для циклического выбора прокси между вызовами
+_proxy_cursor = 0
+
+
 def get_blacklist_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.BLACKLIST_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -2147,7 +2151,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     if cycle_len == 0:
         return fetch_html_direct(url)
 
-    start_index = 0
+    global _proxy_cursor
+    start_index = _proxy_cursor % cycle_len
     attempt = 0
     last_error_html: Optional[str] = None
 
@@ -2192,6 +2197,10 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     time.sleep(max(wait_sec, 1))
 
             try:
+                # Перед реальной попыткой фиксируем следующий стартовый индекс,
+                # чтобы следующие скачивания начинались со следующего прокси в цикле.
+                _proxy_cursor = (idx + 1) % cycle_len
+
                 if use_direct:
                     proxies = None
                     print("[PROXY] Используем прямой IP.")
@@ -2305,7 +2314,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     time.sleep(config.DELAY_DOWNLOAD_ERROR)
                     continue
 
-        start_index = (start_index + 1) % cycle_len
+        start_index = _proxy_cursor % cycle_len
 
     if last_error_html:
         temp_path = os.path.join(
