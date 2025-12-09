@@ -131,6 +131,39 @@ class LissApiClient:
             )
             raise
 
+    async def search_skins(
+        self,
+        game_code: int,
+        steam_market_name: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Вызов метода поиска скинов (доступных к покупке).
+
+        Parameters
+        ----------
+        game_code:
+            730 или 570.
+        steam_market_name:
+            Строка market name (как в Steam).
+        limit, offset:
+            Параметры пагинации.
+
+        Returns
+        -------
+        dict
+            Raw JSON словарь, который может содержать поля ``items`` / ``skins`` /
+            ``results`` с лотами и флаги пагинации ``has_more`` / ``next_offset``.
+        """
+
+        payload = {
+            "game": game_code,
+            "search": steam_market_name,
+            "limit": limit,
+            "offset": offset,
+        }
+        return await self._request("POST", "/v1/market/search", json=payload)
+
     async def get_balance(self) -> float:
         """Return available balance in USD as a float.
 
