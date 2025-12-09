@@ -301,18 +301,33 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
         if httpx is None:
             raise RuntimeError("httpx is required when session is not provided")
         async with httpx.AsyncClient() as client:
-            raw_items = await _download(client)
+            raw = await _download(client)
     else:
-        raw_items = await _download(session)
+        raw = await _download(session)
+
+    if isinstance(raw, dict):
+        # Стандартный случай: {"status": "success", "items": [ ... ]}
+        raw_items = raw.get("items") or []
+    elif isinstance(raw, list):
+        # На всякий случай, если верхний уровень сразу список
+        raw_items = raw
+    else:
+        logger.error("[JSON] Неожиданный формат JSON: %r", type(raw))
+        return []
 
     _save_full_json_snapshot(raw_items, game_code)
 
     normalized: List[Dict[str, Any]] = []
     for item in raw_items:
+        if not isinstance(item, dict):
+            logger.warning("[JSON] Неожиданный элемент в прайс-листе: %r", type(item))
+            continue
+
         lot_id = item.get("id") or item.get("item_id") or item.get("lis_item_id") or item.get("lot_id")
         hold_value = item.get("hold") or item.get("hold_days") or item.get("unlock_at")
         price_value = item.get("price_usd") or item.get("price") or item.get("usd_price")
         name_value = item.get("market_hash_name") or item.get("name")
+
         normalized.append(
             {
                 "lis_item_id": lot_id,
