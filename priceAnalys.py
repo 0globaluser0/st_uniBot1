@@ -1936,13 +1936,6 @@ def parse_sales_from_html(item_name: str, html_text: str) -> List[Sale]:
     except json.JSONDecodeError as e:
         raise ValueError(f"JSON parse error in line1: {e}")
 
-    try:
-        save_path = os.path.join(os.path.dirname(__file__), "parsed_sales.txt")
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
     sales: List[Sale] = []
     for entry in data:
         if not isinstance(entry, list) or len(entry) < 3:
