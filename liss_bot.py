@@ -840,6 +840,7 @@ async def _load_current_market_state(
 
     async def _load_game(game_code: int) -> None:
         raw_items = await fetch_full_json_for_game(game_code, session=session)
+        normalized: List[Dict[str, Any]] = []
         for entry in raw_items:
             steam_market_name = entry.get("name") or entry.get("steam_market_name")
             if not steam_market_name:
@@ -853,24 +854,6 @@ async def _load_current_market_state(
             if lot_price is None:
                 continue
 
-            passes_filters, reason = _lot_passes_basic_filters(
-                steam_market_name,
-                int(entry.get("game_code") or game_code),
-                lot_price,
-                hold_days,
-                min_price_usd=effective_min_price,
-            )
-            if not passes_filters:
-                logger.info(
-                    "[FILTER] account=%s snapshot skip=%s price=%.2f hold=%s reason=%s",
-                    account_name,
-                    steam_market_name,
-                    lot_price,
-                    hold_days,
-                    reason,
-                )
-                continue
-
             lot = {
                 "steam_market_name": steam_market_name,
                 "game_code": int(entry.get("game_code") or game_code),
@@ -879,28 +862,51 @@ async def _load_current_market_state(
                 "hold_days": hold_days,
                 "raw": entry.get("raw") or entry,
             }
+            normalized.append(lot)
+
+        total_lots = 0
+        skipped_lots = 0
+        passed_lots = 0
+
+        for lot in normalized:
+            total_lots += 1
+
+            steam_market_name = lot.get("steam_market_name") or lot.get("name") or ""
+            lot_price = lot.get("price_usd") or 0.0
+            hold_days = lot.get("hold_days") or 0
 
             passes_filters, reason = _lot_passes_basic_filters(
                 steam_market_name,
                 lot["game_code"],
-                lot["price_usd"],
+                lot_price,
                 hold_days,
                 min_price_usd=effective_min_price,
             )
             if not passes_filters:
-                logger.info(
-                    "[FILTER] account=%s snapshot skip=%s price=%.2f hold=%s reason=%s",
-                    account_name,
-                    steam_market_name,
-                    lot_price,
-                    hold_days,
-                    reason,
-                )
+                skipped_lots += 1
                 continue
 
+            passed_lots += 1
             _store_lot_in_state(current_items, lot)
 
+        logger.info(
+            "[FILTER_SUMMARY] account=%s game=%s total_lots=%d passed=%d skipped=%d",
+            account_name,
+            game_code,
+            total_lots,
+            passed_lots,
+            skipped_lots,
+        )
+
+    start = time.perf_counter()
     await asyncio.gather(*(_load_game(game) for game in enabled_games))
+    end = time.perf_counter()
+    logger.info(
+        "[SNAPSHOT_DONE] account=%s games=%s elapsed=%.2f sec",
+        account_name,
+        enabled_games,
+        end - start,
+    )
     return current_items
 
 
