@@ -1123,7 +1123,6 @@ async def _websocket_consumer(
         except asyncio.TimeoutError:
             continue
         try:
-            event_type = (event.get("event") or "").strip()
             steam_market_name = event.get("steam_market_name")
             game_code = int(event.get("game_code") or 0)
             try:
@@ -1137,55 +1136,23 @@ async def _websocket_consumer(
 
             key = (game_code, steam_market_name)
             candidate_lot: Optional[Dict[str, Any]] = None
-            effective_min_price = _effective_min_price(account_name)
 
             async with state_lock:
                 prev_best = _pick_cheapest_lot(current_items.get(key, []))
                 prev_best_price = _lot_price(prev_best)
+                current_best_price = prev_best_price if prev_best_price is not None else math.inf
 
-                if event_type == "obtained_skin_deleted":
-                    if lot_id is not None:
-                        _remove_lot_from_state(current_items, key, lot_id)
-                    new_best = _pick_cheapest_lot(current_items.get(key, []))
-                else:
-                    if lot_price is None:
-                        new_best = None
-                    else:
-                        passes_filters, reason = _lot_passes_basic_filters(
-                            steam_market_name,
-                            game_code,
-                            lot_price,
-                            hold_days,
-                            min_price_usd=effective_min_price,
-                        )
-                        if not passes_filters:
-                            logger.info(
-                                "[FILTER] account=%s ws skip=%s price=%.2f hold=%s reason=%s",
-                                account_name,
-                                steam_market_name,
-                                lot_price,
-                                hold_days,
-                                reason,
-                            )
-                            new_best = None
-                        else:
-                            lot = {
-                                "steam_market_name": steam_market_name,
-                                "game_code": game_code,
-                                "lis_item_id": lot_id or event.get("id") or "",
-                                "price_usd": float(lot_price),
-                                "hold_days": hold_days,
-                                "raw": event,
-                            }
-
-                            _store_lot_in_state(current_items, lot)
-                            new_best = _pick_cheapest_lot(current_items.get(key, []))
-
-                new_best_price = _lot_price(new_best) if new_best else None
-
-                if new_best is not None and new_best_price is not None:
-                    if prev_best is None or prev_best_price is None or new_best_price < prev_best_price:
-                        candidate_lot = new_best
+                if lot_price is not None and lot_price < current_best_price:
+                    new_best = {
+                        "steam_market_name": steam_market_name,
+                        "game_code": game_code,
+                        "lis_item_id": lot_id or event.get("id") or "",
+                        "price_usd": float(lot_price),
+                        "hold_days": hold_days,
+                        "raw": event,
+                    }
+                    current_items[key] = [new_best]
+                    candidate_lot = new_best
 
             if candidate_lot:
                 is_recent = (loop.time() - event.get("received_ts", loop.time())) <= config.LISS_WS_PRIORITY_WINDOW_SEC

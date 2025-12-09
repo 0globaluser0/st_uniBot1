@@ -410,6 +410,9 @@ class LissWebSocketClient:
             "obtained_skin_added",
             "obtained_skin_deleted",
             "obtained_skin_price_changed",
+            "market_lot_added",
+            "market_lot_price_changed",
+            "market_lot_deleted",
         }:
             return
 
@@ -441,6 +444,9 @@ class LissWebSocketClient:
                 "public:obtained_skin_added",
                 "public:obtained_skin_deleted",
                 "public:obtained_skin_price_changed",
+                "public:market_lot_added",
+                "public:market_lot_price_changed",
+                "public:market_lot_deleted",
             ]
 
         async with websockets.connect(self.url) as ws:
