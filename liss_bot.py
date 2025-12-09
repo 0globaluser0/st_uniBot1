@@ -385,7 +385,12 @@ def _estimate_profit(lots: Iterable[Dict[str, Any]], rec_price: float) -> float:
 def _normalize_search_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     entries: Any = None
     if isinstance(payload, dict):
-        entries = payload.get("items") or payload.get("skins") or payload.get("results")
+        entries = (
+            payload.get("data")
+            or payload.get("items")
+            or payload.get("skins")
+            or payload.get("results")
+        )
     if not isinstance(entries, list):
         return []
     normalized: List[Dict[str, Any]] = []
@@ -404,7 +409,6 @@ async def search_and_select_lots(
     *,
     desired_qty: int,
     avg_sales: float,
-    page_limit: int = 100,
     max_pages: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Ищет лоты через ``/v1/market/search`` и выбирает лучшие в рамках лимитов."""
@@ -412,11 +416,11 @@ async def search_and_select_lots(
     effective_min_price = _effective_min_price(account_name)
     lots: List[Dict[str, Any]] = []
     initial_price_bounds: Optional[Tuple[float, float]] = None
-    offset = 0
+    cursor: str | None = None
     pages_fetched = 0
 
     while True:
-        payload = await client.search_skins(game_code, steam_market_name, limit=page_limit, offset=offset)
+        payload = await client.search_skins(game_code, steam_market_name, cursor=cursor)
         page_entries = _normalize_search_results(payload)
 
         for entry in page_entries:
@@ -432,6 +436,9 @@ async def search_and_select_lots(
                 or entry.get("name")
                 or steam_market_name
             )
+
+            if name != steam_market_name:
+                continue
             lot_game = int(entry.get("app_id") or entry.get("game") or game_code)
 
             passes_filters, _ = _lot_passes_basic_filters(
@@ -480,13 +487,15 @@ async def search_and_select_lots(
         if max_pages is not None and pages_fetched >= max_pages:
             break
 
-        has_more = bool(payload.get("has_more"))
-        next_offset = payload.get("next_offset")
-        if isinstance(next_offset, int):
-            has_more = has_more or next_offset > offset
-            offset = next_offset
-        else:
-            offset += page_limit
+        meta = payload.get("meta") if isinstance(payload, dict) else {}
+        cursor = None
+        if isinstance(meta, dict):
+            cursor = meta.get("next_cursor")
+        if cursor is None:
+            cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
+
+        has_more = bool(cursor)
+
         if not has_more or not page_entries:
             break
 
