@@ -637,6 +637,43 @@ async def liss_buy_worker(
         try:
             _cleanup_expired_temp_locks()
             now = loop.time()
+
+            # Если среди кандидатов на покупку нет lot_id / lis_item_id / item_id,
+            # нужно сначала получить реальные лоты через search_skins.
+            if any(_lot_id(lot) is None for lot in request.selected_lots):
+                wait_for = config.LISS_API_REQUEST_DELAY - (now - last_call_ts)
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
+
+                desired_qty = max(len(request.selected_lots), 1)
+                logger.info(
+                    "[LISS_WORKER %s] Обновляем лоты через search_skins для %s (qty=%s)",
+                    worker_name,
+                    request.steam_market_name,
+                    desired_qty,
+                )
+                refreshed_lots = await search_and_select_lots(
+                    client,
+                    request.steam_market_name,
+                    request.game_code,
+                    request.account_name,
+                    desired_qty=desired_qty,
+                    avg_sales=request.avg_sales,
+                )
+                last_call_ts = loop.time()
+
+                if not refreshed_lots:
+                    logger.info(
+                        "[LISS_WORKER %s] Нет лотов с ID для %s, пропускаем покупку",
+                        worker_name,
+                        request.steam_market_name,
+                    )
+                    continue
+
+                request.selected_lots = refreshed_lots
+                request.profit = _estimate_profit(refreshed_lots, request.target_rec_price)
+
+            now = loop.time()
             wait_for = config.LISS_API_REQUEST_DELAY - (now - last_call_ts)
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
