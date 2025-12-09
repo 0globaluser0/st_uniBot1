@@ -140,6 +140,20 @@ class LissApiClient:
             )
             raise
 
+    async def get_ws_token(self) -> str:
+        """
+        Получить токен для Centrifugo через /v1/user/get-ws-token.
+        """
+
+        data = await self._request("GET", "/v1/user/get-ws-token")
+        if isinstance(data, dict):
+            token = data.get("token") or (data.get("data") or {}).get("token")
+        else:
+            token = None
+        if not token:
+            raise RuntimeError(f"WS token not found in response: {data!r}")
+        return token
+
     async def search_skins(
         self,
         game_code: int,
@@ -463,12 +477,11 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
 class LissWebSocketClient:
     """Centrifugo-based WebSocket consumer for LIS-SKINS events."""
 
-    def __init__(self, client: LissApiClient, queue: asyncio.Queue, url: str = config.LISS_WS_URL):
+    def __init__(self, api_client: LissApiClient, queue: asyncio.Queue, url: str = config.LISS_WS_URL):
         if websockets is None:
             raise RuntimeError("websockets package is required for LissWebSocketClient")
-        self.client = client
-        self.api_key = client.api_key
-        self.url = url
+        self.api_client = api_client
+        self.url = url.rstrip("/") + "/connection/websocket"
         self.queue = queue
         self._msg_id = 0
         self._ws = None
@@ -479,24 +492,57 @@ class LissWebSocketClient:
         await self._ws.send(json.dumps(payload))
 
     async def _handle_message(self, message: Dict[str, Any]) -> None:
-        if message.get("method") != "message":
-            return
+        method = message.get("method")
+        params = message.get("params") or {}
 
-        params = message.get("params", {})
-        data = params.get("data") or {}
-        event_type = data.get("event")
-        payload = data.get("payload") or {}
+        if method == "publication":
+            channel = params.get("channel")
+            data = params.get("data") or {}
+            event_type = data.get("event")
+            payload = data.get("payload") or {}
 
-        if event_type not in {
-            "obtained_skin_added",
-            "obtained_skin_deleted",
-            "obtained_skin_price_changed",
-            "market_lot_added",
-            "market_lot_price_changed",
-            "market_lot_deleted",
-        }:
-            return
+            if channel == "public:obtained-skins":
+                if event_type == "obtained_skin_added":
+                    await self._handle_public_obtained(payload, event_type)
+                elif event_type == "obtained_skin_deleted":
+                    await self._handle_public_obtained(payload, event_type)
+                elif event_type == "obtained_skin_price_changed":
+                    await self._handle_public_obtained(payload, event_type)
 
+            elif channel == "user:skins":
+                await self._handle_user_skins_event(data)
+
+        elif method == "ping":
+            await self._send({"method": "pong"})
+        
+    async def _subscribe(self, channels: Iterable[str]) -> None:
+        for channel in channels:
+            await self._send({"method": "subscribe", "params": {"channel": channel}})
+
+    async def run(self, channels: Optional[Iterable[str]] = None) -> None:
+        """Connect, authenticate and stream lot events into the provided queue."""
+
+        if channels is None:
+            channels = [
+                "public:obtained-skins",  # общий поток по рынку
+                "user:skins",             # события по своим купленным скинам
+            ]
+
+        ws_token = await self.api_client.get_ws_token()
+
+        async with websockets.connect(self.url) as ws:
+            self._ws = ws
+            await self._send({"method": "connect", "params": {"token": ws_token}})
+            await self._subscribe(channels)
+
+            async for raw in ws:  # type: ignore[attr-defined]
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                await self._handle_message(message)
+
+    async def _handle_public_obtained(self, payload: Dict[str, Any], event_type: str) -> None:
         normalized = {
             "event": event_type,
             "lis_item_id": payload.get("id") or payload.get("lis_item_id") or payload.get("lot_id"),
@@ -513,31 +559,7 @@ class LissWebSocketClient:
             normalized["received_ts"] = 0.0
         await self.queue.put(normalized)
 
-    async def _subscribe(self, channels: Iterable[str]) -> None:
-        for channel in channels:
-            await self._send({"method": "subscribe", "params": {"channel": channel}})
+    async def _handle_user_skins_event(self, data: Dict[str, Any]) -> None:
+        """Placeholder handler for user-specific skin events."""
 
-    async def run(self, channels: Optional[Iterable[str]] = None) -> None:
-        """Connect, authenticate and stream lot events into the provided queue."""
-
-        if channels is None:
-            channels = [
-                "public:obtained_skin_added",
-                "public:obtained_skin_deleted",
-                "public:obtained_skin_price_changed",
-                "public:market_lot_added",
-                "public:market_lot_price_changed",
-                "public:market_lot_deleted",
-            ]
-
-        async with websockets.connect(self.url) as ws:
-            self._ws = ws
-            await self._send({"method": "connect", "params": {"token": self.api_key}})
-            await self._subscribe(channels)
-
-            async for raw in ws:  # type: ignore[attr-defined]
-                try:
-                    message = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                await self._handle_message(message)
+        await self.queue.put({"event": data.get("event"), "raw": data})
