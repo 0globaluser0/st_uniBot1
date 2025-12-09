@@ -145,7 +145,7 @@ class LissApiClient:
         Получить токен для Centrifugo через /v1/user/get-ws-token.
         """
 
-        data = await self._request("GET", "/v1/user/get-ws-token")
+        data = await self._request("GET", "/user/get-ws-token")
         if isinstance(data, dict):
             token = data.get("token") or (data.get("data") or {}).get("token")
         else:
@@ -185,7 +185,7 @@ class LissApiClient:
             "limit": limit,
             "offset": offset,
         }
-        return await self._request("POST", "/v1/market/search", json=payload)
+        return await self._request("POST", "/market/search", json=payload)
 
     async def get_balance(self) -> float:
         """Return available balance in USD as a float.
@@ -273,7 +273,7 @@ class LissApiClient:
         # ВАЖНО: убедись, что base_url не содержит /v1 дважды
         # Если LISS_API_BASE_URL = "https://api.lis-skins.com", то путь здесь должен быть "/v1/market/buy"
         # Если LISS_API_BASE_URL = "https://api.lis-skins.com/v1", то путь здесь должен быть "/market/buy"
-        result = await self._request("POST", "/v1/market/buy", json=body)
+        result = await self._request("POST", "/market/buy", json=body)
         return _normalize_purchase_results(result)
 
     async def get_purchase_info(self, purchase_id: str) -> Any:
