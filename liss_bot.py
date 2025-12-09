@@ -54,6 +54,14 @@ class PurchaseRequest:
     profit: float
 
 
+@dataclass
+class LissAccountConfig:
+    name: str
+    api_key: str
+    partner: str | None
+    token: str | None
+
+
 steam_parse_queue: asyncio.PriorityQueue[Tuple[int, int, ItemForSteamParse]] = (
     asyncio.PriorityQueue()
 )
@@ -1162,13 +1170,18 @@ async def _websocket_consumer(
 
 
 async def run_liss_market(
-    account_name: str, api_key: str, session: Any, stop_event: asyncio.Event
+    account_name: str,
+    api_key: str,
+    partner: str | None,
+    token: str | None,
+    session: Any,
+    stop_event: asyncio.Event,
 ) -> None:
     """Основной цикл: стартуем воркеры, загружаем JSON и слушаем WebSocket."""
 
-    client = LissApiClient(api_key, account_name, session)
+    client = LissApiClient(api_key, account_name, session, partner=partner, token=token)
     ws_events: asyncio.Queue = asyncio.Queue()
-    ws_client = LissWebSocketClient(api_key, ws_events)
+    ws_client = LissWebSocketClient(client, ws_events)
 
     await _refresh_account_price_floor(account_name, client)
 
@@ -1242,50 +1255,53 @@ async def _create_http_session():
     raise RuntimeError("Нужен httpx или aiohttp для работы с LIS-SKINS")
 
 
-def load_liss_accounts(path: Optional[str] = None) -> List[Tuple[str, str]]:
-    """Прочитать файл аккаунтов и вернуть список пар (api_key, account_name)."""
-
-    filename = path or config.LISS_ACCOUNTS_FILE
-    accounts: List[Tuple[str, str]] = []
-
+def load_liss_accounts(path: str = "liss_accs.txt") -> list[LissAccountConfig]:
+    accounts: list[LissAccountConfig] = []
     try:
-        with open(filename, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # name_acc@api_key:PARTNER:TOKEN
+                try:
+                    left, partner, token = line.split(":", 2)
+                    name, api_key = left.split("@", 1)
+                except ValueError:
+                    # Можно залогировать warning и пропустить строку
+                    continue
+                accounts.append(
+                    LissAccountConfig(
+                        name=name.strip(),
+                        api_key=api_key.strip(),
+                        partner=partner.strip() or None,
+                        token=token.strip() or None,
+                    )
+                )
     except FileNotFoundError:
-        logger.error("[ACCOUNTS] Файл %s не найден", filename)
-        return accounts
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            logger.warning("[ACCOUNTS] Строка без разделителя ':' пропущена: %s", line)
-            continue
-        api_key, account_name = line.split(":", 1)
-        api_key = api_key.strip()
-        account_name = account_name.strip()
-        if not api_key or not account_name:
-            logger.warning("[ACCOUNTS] Пустой api_key или account_name в строке: %s", line)
-            continue
-        accounts.append((api_key, account_name))
-
+        # залогировать ошибку
+        pass
     return accounts
 
 
-async def run_for_account(
-    api_key: str, account_name: str, *, run_seconds: Optional[float] = None
-) -> None:
+async def run_for_account(account: LissAccountConfig, *, run_seconds: Optional[float] = None) -> None:
     """Отработать один аккаунт LIS последовательно и корректно завершить."""
 
     _reset_liss_state()
     stop_event = asyncio.Event()
 
-    logger.info("[ACCOUNT] Старт аккаунта %s", account_name)
+    logger.info("[ACCOUNT] Старт аккаунта %s", account.name)
 
     async with _create_http_session() as session:
         runner_task = asyncio.create_task(
-            run_liss_market(account_name, api_key, session, stop_event)
+            run_liss_market(
+                account.name,
+                account.api_key,
+                account.partner,
+                account.token,
+                session,
+                stop_event,
+            )
         )
 
         timer_task: Optional[asyncio.Task] = None
@@ -1305,7 +1321,7 @@ async def run_for_account(
                 logger.info(
                     "[MAIN] Таймер %.0fs для аккаунта %s истёк, завершаем",
                     run_seconds,
-                    account_name,
+                    account.name,
                 )
         finally:
             stop_event.set()
@@ -1316,7 +1332,7 @@ async def run_for_account(
                 to_wait.append(timer_task)
             await asyncio.gather(*to_wait, return_exceptions=True)
 
-    logger.info("[ACCOUNT] Остановка аккаунта %s", account_name)
+    logger.info("[ACCOUNT] Остановка аккаунта %s", account.name)
 
 
 async def main() -> None:
@@ -1328,12 +1344,12 @@ async def main() -> None:
     runtime = config.LISS_ACCOUNT_RUNTIME_SECONDS
     per_account_seconds = runtime if runtime > 0 else None
 
-    for api_key, account_name in accounts:
-        logger.info("[MAIN] Запуск обработки аккаунта %s", account_name)
+    for account in accounts:
+        logger.info("[MAIN] Запуск обработки аккаунта %s", account.name)
         try:
-            await run_for_account(api_key, account_name, run_seconds=per_account_seconds)
+            await run_for_account(account, run_seconds=per_account_seconds)
         except Exception as e:
-            logger.exception("[MAIN] Ошибка при обработке %s: %s", account_name, e)
+            logger.exception("[MAIN] Ошибка при обработке %s: %s", account.name, e)
 
 
 if __name__ == "__main__":
