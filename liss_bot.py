@@ -394,6 +394,150 @@ def _estimate_profit(lots: Iterable[Dict[str, Any]], rec_price: float) -> float:
     )
 
 
+def _normalize_search_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries: Any = None
+    if isinstance(payload, dict):
+        entries = payload.get("items") or payload.get("skins") or payload.get("results")
+    if not isinstance(entries, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        normalized.append(entry)
+    return normalized
+
+
+async def search_and_select_lots(
+    client: LissApiClient,
+    steam_market_name: str,
+    game_code: int,
+    account_name: str,
+    *,
+    desired_qty: int,
+    avg_sales: float,
+    page_limit: int = 100,
+    max_pages: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Ищет лоты через ``/v1/market/search`` и выбирает лучшие в рамках лимитов."""
+
+    effective_min_price = _effective_min_price(account_name)
+    lots: List[Dict[str, Any]] = []
+    initial_price_bounds: Optional[Tuple[float, float]] = None
+    offset = 0
+    pages_fetched = 0
+
+    while True:
+        payload = await client.search_skins(game_code, steam_market_name, limit=page_limit, offset=offset)
+        page_entries = _normalize_search_results(payload)
+
+        for entry in page_entries:
+            price_usd = _extract_lot_price(entry, None)
+            if price_usd is None:
+                continue
+
+            hold_days = _extract_lot_hold_days(entry)
+            name = (
+                entry.get("steam_market_name")
+                or entry.get("market_hash_name")
+                or entry.get("market_hash")
+                or entry.get("name")
+                or steam_market_name
+            )
+            lot_game = int(entry.get("app_id") or entry.get("game") or game_code)
+
+            passes_filters, _ = _lot_passes_basic_filters(
+                name,
+                lot_game,
+                float(price_usd),
+                hold_days,
+                min_price_usd=effective_min_price,
+            )
+            if not passes_filters or _is_blacklisted(name):
+                continue
+
+            if initial_price_bounds is not None:
+                min_price, max_price = initial_price_bounds
+                if price_usd < min_price or price_usd > max_price:
+                    continue
+
+            lot: Dict[str, Any] = {
+                "lot_id": entry.get("lot_id")
+                or entry.get("lis_item_id")
+                or entry.get("item_id")
+                or entry.get("id"),
+                "custom_id": entry.get("custom_id"),
+                "asset_id": entry.get("asset_id") or entry.get("item_asset_id"),
+                "name": name,
+                "steam_market_name": name,
+                "game_code": lot_game,
+                "price_usd": float(price_usd),
+                "hold_days": hold_days,
+            }
+
+            for extra_key in ("unlocked_at", "unlock_at", "unlock_dt"):
+                if extra_key in entry:
+                    lot[extra_key] = entry.get(extra_key)
+                    break
+
+            lots.append(lot)
+
+        if initial_price_bounds is None and lots:
+            prices = [float(l.get("price_usd", 0)) for l in lots]
+            initial_price_bounds = (min(prices), max(prices))
+
+        pages_fetched += 1
+        if len(lots) >= desired_qty:
+            break
+        if max_pages is not None and pages_fetched >= max_pages:
+            break
+
+        has_more = bool(payload.get("has_more"))
+        next_offset = payload.get("next_offset")
+        if isinstance(next_offset, int):
+            has_more = has_more or next_offset > offset
+            offset = next_offset
+        else:
+            offset += page_limit
+        if not has_more or not page_entries:
+            break
+
+    lots.sort(key=lambda x: (x.get("price_usd", math.inf), x.get("hold_days", math.inf)))
+
+    now_dt = datetime.utcnow()
+    remaining_qty, remaining_sum = priceAnalys.calculate_remaining_liss_limits(
+        steam_market_name, account_name, avg_sales, now_dt
+    )
+    allowed_qty = min(int(math.floor(remaining_qty)), desired_qty)
+
+    selected_lots: List[Dict[str, Any]] = []
+    total_qty = 0
+    total_sum = 0.0
+
+    for lot in lots:
+        lot_price = float(lot.get("price_usd", 0.0))
+        quantity = int(lot.get("quantity", 1))
+        lot_sum = lot_price * quantity
+
+        if total_qty + quantity > allowed_qty:
+            continue
+        if total_sum + lot_sum > remaining_sum:
+            continue
+
+        lot_copy = dict(lot)
+        unlock_dt = now_dt + timedelta(days=lot_copy.get("hold_days", 0))
+        lot_copy["unlock_dt"] = unlock_dt.isoformat(timespec="seconds")
+
+        selected_lots.append(lot_copy)
+        total_qty += quantity
+        total_sum += lot_sum
+
+        if total_qty >= allowed_qty:
+            break
+
+    return selected_lots
+
+
 async def _queue_steam_parse(item: ItemForSteamParse, high_priority: bool) -> None:
     global _last_high_priority_ts, _high_priority_group
 
