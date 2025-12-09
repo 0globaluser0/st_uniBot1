@@ -14,7 +14,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import config
 import priceAnalys
-from liss_api import LissApiClient, LissWebSocketClient, fetch_full_json_for_game
+from liss_api import (
+    LissApiClient,
+    LissWebSocketClient,
+    _normalize_purchase_results,
+    fetch_full_json_for_game,
+)
 
 
 logging.basicConfig(
@@ -128,31 +133,6 @@ def _is_successful_status(entry: Dict[str, Any]) -> bool:
     if "success" in status or status in {"ok", "purchased", "done"}:
         return True
     return bool(entry.get("purchase_id") or entry.get("item_asset_id"))
-
-
-def _normalize_purchase_results(payload: Any) -> Dict[str, Dict[str, Any]]:
-    if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, dict):
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        entries = data.get("items") or data.get("results") or data.get("result") or payload.get("items")
-        if entries is None:
-            entries = []
-    else:
-        entries = []
-
-    mapping: Dict[str, Dict[str, Any]] = {}
-    if not isinstance(entries, list):
-        return mapping
-
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        lot_id = _lot_id(entry)
-        if lot_id is None:
-            continue
-        mapping[lot_id] = entry
-    return mapping
 
 
 def _make_liss_key(account_name: str, lot: Dict[str, Any]) -> Optional[Tuple[str, str]]:

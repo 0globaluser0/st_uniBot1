@@ -194,39 +194,73 @@ class LissApiClient:
             return 0.0
 
     async def buy_items(self, items: Iterable[Dict[str, Any]]) -> Any:
-        """Purchase items by unique lot identifiers.
+        """
+        Покупка лотов через /v1/market/buy.
 
-        Parameters
-        ----------
-        items:
-            Iterable of item descriptors (dicts). Each item must include one of
-            the ID fields used by LIS-SKINS market: ``id``/``lot_id``/``item_id``
-            or ``lis_item_id``. Duplicates are removed before sending.
-
-        The request body is ``{"items": [...], "skip_unavailable": true}`` so
-        already-sold lots do not block batch purchases. The raw API response is
-        returned to the caller, typically containing per-lot results with
-        ``purchase_id`` and ``item_asset_id`` keys.
+        items — итерируемый набор словарей, в которых должен быть один из ID:
+        id / lot_id / item_id / lis_item_id. Дубликаты отбрасываются.
         """
 
-        unique_items: List[Dict[str, Any]] = []
-        seen_ids = set()
+        ids: list[int] = []
+        seen: set[int] = set()
 
-        for item in items:
-            lot_id = (
-                item.get("lot_id")
-                or item.get("lis_item_id")
-                or item.get("item_id")
-                or item.get("id")
-                or item.get("custom_id")
+        # Собираем уникальные ID
+        for lot in items:
+            raw_id = (
+                lot.get("id")
+                or lot.get("lot_id")
+                or lot.get("lis_item_id")
+                or lot.get("item_id")
             )
-            if lot_id is None or lot_id in seen_ids:
+            if raw_id is None:
                 continue
-            seen_ids.add(lot_id)
-            unique_items.append(item)
+            try:
+                lot_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if lot_id in seen:
+                continue
+            seen.add(lot_id)
+            ids.append(lot_id)
 
-        body = {"items": unique_items, "skip_unavailable": True}
-        return await self._request("POST", "/market/buy", json=body)
+        if not ids:
+            logger.warning("[LISS_BUY] Пустой список ids для покупки")
+            return {}
+
+        body: dict[str, Any] = {
+            "ids": ids,
+            "skip_unavailable": True,
+        }
+
+        # partner / token — ОБЯЗАТЕЛЬНЫ в доках, если хотим сразу выводить на конкретный Steam-акк
+        if self.partner and self.token:
+            body["partner"] = self.partner
+            body["token"] = self.token
+
+        # max_price как верхняя граница по цене (опционально)
+        max_price = None
+        for lot in items:
+            price = lot.get("price_usd") or lot.get("lis_price_usd")
+            try:
+                price_f = float(price)
+            except (TypeError, ValueError):
+                continue
+            max_price = price_f if max_price is None else max(max_price, price_f)
+
+        if max_price is not None:
+            body["max_price"] = round(max_price * 1.01, 4)
+
+        # custom_id для защиты от дублей (рекомендация из доков)
+        prefix = getattr(config, "LISS_CUSTOM_ID_PREFIX", self.account_name)
+        body["custom_id"] = f"{prefix}:{self.account_name}:{int(datetime.utcnow().timestamp())}"
+
+        logger.info("[LISS_BUY] Покупка через /v1/market/buy: %s", body)
+
+        # ВАЖНО: убедись, что base_url не содержит /v1 дважды
+        # Если LISS_API_BASE_URL = "https://api.lis-skins.com", то путь здесь должен быть "/v1/market/buy"
+        # Если LISS_API_BASE_URL = "https://api.lis-skins.com/v1", то путь здесь должен быть "/market/buy"
+        result = await self._request("POST", "/v1/market/buy", json=body)
+        return _normalize_purchase_results(result)
 
     async def get_purchase_info(self, purchase_id: str) -> Any:
         """Fetch purchase status and item details by purchase identifier.
@@ -283,6 +317,43 @@ class LissApiClient:
             body["token"] = token
 
         return await self._request("POST", "/market/withdraw-all", json=body)
+
+
+def _normalize_purchase_results(payload: Any) -> Dict[str, Dict[str, Any]]:
+    def _extract_id(entry: Dict[str, Any]) -> Optional[str]:
+        for key in ("lot_id", "lis_item_id", "item_id", "id", "custom_id"):
+            value = entry.get(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        entries = (
+            data.get("items")
+            or data.get("results")
+            or data.get("result")
+            or payload.get("items")
+        )
+        if entries is None:
+            entries = []
+    else:
+        entries = []
+
+    mapping: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(entries, list):
+        return mapping
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        lot_id = _extract_id(entry)
+        if lot_id is None:
+            continue
+        mapping[lot_id] = entry
+    return mapping
 
 
 def _save_full_json_snapshot(raw_items: List[Dict[str, Any]], game_code: int) -> None:
