@@ -61,11 +61,20 @@ class LissApiClient:
         Either :class:`aiohttp.ClientSession` or :class:`httpx.AsyncClient`.
     """
 
-    def __init__(self, api_key: str, account_name: str, session: Any):
+    def __init__(
+        self,
+        api_key: str,
+        account_name: str,
+        session: Any,
+        partner: str | None = None,
+        token: str | None = None,
+    ):
         self.api_key = api_key
         self.account_name = account_name
         self.session = session
         self.base_url = config.LISS_API_BASE_URL.rstrip("/")
+        self.partner = partner
+        self.token = token
 
     def _build_headers(self) -> Dict[str, str]:
         return {
@@ -383,10 +392,11 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
 class LissWebSocketClient:
     """Centrifugo-based WebSocket consumer for LIS-SKINS events."""
 
-    def __init__(self, api_key: str, queue: asyncio.Queue, url: str = config.LISS_WS_URL):
+    def __init__(self, client: LissApiClient, queue: asyncio.Queue, url: str = config.LISS_WS_URL):
         if websockets is None:
             raise RuntimeError("websockets package is required for LissWebSocketClient")
-        self.api_key = api_key
+        self.client = client
+        self.api_key = client.api_key
         self.url = url
         self.queue = queue
         self._msg_id = 0
