@@ -275,8 +275,7 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
     Returns
     -------
     list of dict
-        Normalized list with keys: ``lis_item_id``, ``name``, ``game_code``,
-        ``price_usd``, ``hold``, plus the full raw entry under ``raw``.
+        Raw list of entries returned by LIS, without additional normalization.
     """
 
     file_map = {730: "api_csgo_full.json", 570: "api_dota2_full.json"}
@@ -317,29 +316,7 @@ async def fetch_full_json_for_game(game_code: int, session: Optional[Any] = None
 
     _save_full_json_snapshot(raw_items, game_code)
 
-    normalized: List[Dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            logger.warning("[JSON] Неожиданный элемент в прайс-листе: %r", type(item))
-            continue
-
-        lot_id = item.get("id") or item.get("item_id") or item.get("lis_item_id") or item.get("lot_id")
-        hold_value = item.get("hold") or item.get("hold_days") or item.get("unlock_at")
-        price_value = item.get("price_usd") or item.get("price") or item.get("usd_price")
-        name_value = item.get("market_hash_name") or item.get("name")
-
-        normalized.append(
-            {
-                "lis_item_id": lot_id,
-                "name": name_value,
-                "game_code": item.get("app_id") or item.get("game") or game_code,
-                "price_usd": float(price_value) if price_value is not None else None,
-                "hold": hold_value,
-                "raw": item,
-            }
-        )
-
-    return normalized
+    return raw_items
 
 
 class LissWebSocketClient:
