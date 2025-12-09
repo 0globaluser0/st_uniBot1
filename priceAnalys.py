@@ -49,6 +49,12 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_proxy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.PROXY_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def get_blacklist_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.BLACKLIST_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -76,21 +82,6 @@ def init_db() -> None:
         """
     )
 
-    # Таблица прокси
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proxies (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            address             TEXT UNIQUE,
-            last_used_ts        REAL,
-            rest_until_ts       REAL,
-            fail_stage          INTEGER DEFAULT 0,
-            fallback_fail_count INTEGER DEFAULT 0,
-            disabled            INTEGER DEFAULT 0
-        )
-        """
-    )
-
     # Таблица лимитов покупок по предмету и аккаунту LIS
     cur.execute(
         """
@@ -108,6 +99,25 @@ def init_db() -> None:
 
     conn.commit()
     conn.close()
+
+    # Таблица прокси в отдельной базе
+    proxy_conn = get_proxy_conn()
+    proxy_cur = proxy_conn.cursor()
+    proxy_cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proxies (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            address             TEXT UNIQUE,
+            last_used_ts        REAL,
+            rest_until_ts       REAL,
+            fail_stage          INTEGER DEFAULT 0,
+            fallback_fail_count INTEGER DEFAULT 0,
+            disabled            INTEGER DEFAULT 0
+        )
+        """
+    )
+    proxy_conn.commit()
+    proxy_conn.close()
 
     # Таблица блэклиста в отдельной базе
     bl_conn = get_blacklist_conn()
@@ -127,7 +137,7 @@ def init_db() -> None:
 
 
 def upsert_proxy(address: str) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -2014,7 +2024,7 @@ def dump_sales_debug(item_name: str, sales: List[Sale]) -> None:
 # (эта часть не менялась, оставляю как в предыдущей версии)
 
 def get_all_proxies() -> List[sqlite3.Row]:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM proxies WHERE disabled = 0 ORDER BY id ASC")
     rows = cur.fetchall()
@@ -2031,7 +2041,7 @@ def update_proxy_row(
     fallback_fail_count: Optional[int] = None,
     disabled: Optional[int] = None,
 ) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
 
     sets = []

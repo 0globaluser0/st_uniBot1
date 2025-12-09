@@ -6,6 +6,9 @@ DB_PATH = "steam_analyser.db"
 # Отдельная база для блэклиста
 BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
 
+# Отдельная база для прокси
+PROXY_DB_PATH = "steam_analyser_proxies.db"
+
 PROXIES_FILE = "proxies.txt"
 
 HTML_APPROVE_DIR = "HTML_steam_approve"

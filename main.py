@@ -8,6 +8,7 @@ def main() -> None:
     print("Steam price analyser (без телеграма)")
     print("====================================")
     print("Файл БД:", config.DB_PATH)
+    print("База прокси:", config.PROXY_DB_PATH)
     print("Режим прокси:", config.PROXY_SELECT)
     print()
 
