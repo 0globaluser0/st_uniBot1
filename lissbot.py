@@ -6,11 +6,9 @@
 """
 
 import json
-import signal
 import time
-from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 from urllib.parse import quote
 
 import requests
@@ -341,27 +339,6 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str) -> None:
     process_new_items(filtered_items, processed_names)
 
 
-@contextmanager
-def cycle_timeout(timeout_seconds: int) -> None:
-    """Принудительно завершает цикл по таймеру без многопоточности."""
-
-    if timeout_seconds <= 0:
-        yield
-        return
-
-    def _handler(signum: int, frame: Any) -> None:  # pragma: no cover - ОС зависимо
-        raise TimeoutError("refresh cycle exceeded time limit")
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(timeout_seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous_handler)
-
-
 def main() -> None:
     priceAnalys.init_db()
     priceAnalys.load_proxies_from_file()
@@ -370,33 +347,24 @@ def main() -> None:
     orange = "\033[38;5;208m"
     reset = "\033[0m"
 
-    next_cycle_start = time.time()
     while True:
-        now = time.time()
-        sleep_time = next_cycle_start - now
+        iteration_started_at = time.time()
+        try:
+            run_refresh_cycle(refresh_seconds, orange, reset)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
+        except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
+            print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
+
+        elapsed = time.time() - iteration_started_at
+        sleep_time = max(refresh_seconds - int(elapsed), 0)
         try:
             if sleep_time > 0:
                 time.sleep(sleep_time)
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
             break
-
-        iteration_started_at = time.time()
-        deadline = iteration_started_at + refresh_seconds
-        next_cycle_start = deadline
-        try:
-            remaining = max(1, int(deadline - time.time()))
-            with cycle_timeout(remaining):
-                run_refresh_cycle(refresh_seconds, orange, reset)
-        except KeyboardInterrupt:
-            print("[LISS] Остановка по запросу пользователя.")
-            break
-        except TimeoutError:
-            print(
-                f"[LISS][WARN] Цикл превысил {refresh_seconds} секунд и будет перезапущен"
-            )
-        except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
-            print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
 
 
 if __name__ == "__main__":
