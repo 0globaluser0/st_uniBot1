@@ -240,9 +240,10 @@ def save_item_result(
     conn.close()
 
 
-def add_to_blacklist(item_name: str, reason: str) -> None:
+def add_to_blacklist(item_name: str, reason: str, days: Optional[float] = None) -> None:
     now = datetime.utcnow()
-    expires = now + timedelta(days=config.BLACKLIST_DAYS)
+    duration_days = config.BLACKLIST_DAYS if days is None else days
+    expires = now + timedelta(days=duration_days)
     conn = get_blacklist_conn()
     cur = conn.cursor()
     cur.execute(
@@ -260,10 +261,12 @@ def add_to_blacklist(item_name: str, reason: str) -> None:
     conn.close()
 
 
-def blacklist_with_html(item_name: str, reason: str, html: str) -> Dict[str, str]:
+def blacklist_with_html(
+    item_name: str, reason: str, html: str, days: Optional[float] = None
+) -> Dict[str, str]:
     """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
     print(f"[ANALYSIS] {item_name}: {reason}")
-    add_to_blacklist(item_name, reason)
+    add_to_blacklist(item_name, reason, days=days)
     html_path = os.path.join(
         config.HTML_BLACKLIST_DIR,
         f"{safe_filename(item_name)}.html",
@@ -2415,6 +2418,18 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     tier = int(shape_result["tier"])
     graph_type = shape_result["graph_type"]
     reason = shape_result["reason"]
+
+    if rec_price < config.MIN_REC_PRICE_USD:
+        reason = (
+            "rec_price_below_minimum "
+            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD:.4f})"
+        )
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            days=config.MIN_REC_PRICE_BLACKLIST_DAYS,
+        )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
 
