@@ -355,8 +355,8 @@ def blacklist_with_html(
         redirect, days, reason = _base_price_blacklist_redirect(reason, base_price, days)
         rec_price_blacklist = redirect or rec_price_blacklist
 
-    if log_reason:
-        print(f"[ANALYSIS] {item_name}: {reason}")
+    #if log_reason:
+        #print(f"[ANALYSIS] {item_name}: {reason}")
     add_to_blacklist(item_name, reason, days=days, rec_price=rec_price_blacklist)
     html_path = os.path.join(
         config.HTML_BLACKLIST_DIR,
@@ -2125,7 +2125,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             try:
                 if use_direct:
                     proxies = None
-                    print("[PROXY] Используем прямой IP.")
+                    #print("[PROXY] Используем прямой IP.")
                 else:
                     proxies = build_requests_proxy(row["address"])
                    #print(f"[PROXY] Используем прокси {row['address']}.")
