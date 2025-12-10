@@ -3,6 +3,9 @@
 # ------------ General paths ------------
 DB_PATH = "steam_analyser.db"
 
+# Отдельная база для прокси
+PROXY_DB_PATH = "steam_analyser_proxies.db"
+
 # Отдельная база для блэклиста
 BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
 
