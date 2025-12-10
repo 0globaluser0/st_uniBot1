@@ -6,7 +6,6 @@
 """
 
 import json
-import threading
 import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
@@ -348,36 +347,24 @@ def main() -> None:
     orange = "\033[38;5;208m"
     reset = "\033[0m"
 
-    active_threads: List[threading.Thread] = []
-    next_run = time.monotonic()
+    while True:
+        iteration_started_at = time.time()
+        try:
+            run_refresh_cycle(refresh_seconds, orange, reset)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
+        except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
+            print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
 
-    def start_cycle_thread() -> None:
-        thread = threading.Thread(
-            target=run_refresh_cycle,
-            args=(refresh_seconds, orange, reset),
-            daemon=True,
-        )
-        thread.start()
-        active_threads.append(thread)
-
-    try:
-        while True:
-            now = time.monotonic()
-            if now >= next_run:
-                start_cycle_thread()
-                next_run += refresh_seconds
-                while now >= next_run:
-                    next_run += refresh_seconds
-
-            active_threads[:] = [t for t in active_threads if t.is_alive()]
-
-            sleep_until_next = max(min(next_run - time.monotonic(), 1.0), 0.05)
-            time.sleep(sleep_until_next)
-    except KeyboardInterrupt:
-        print("[LISS] Остановка по запросу пользователя.")
-    finally:
-        for thread in active_threads:
-            thread.join()
+        elapsed = time.time() - iteration_started_at
+        sleep_time = max(refresh_seconds - int(elapsed), 0)
+        try:
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
 
 
 if __name__ == "__main__":
