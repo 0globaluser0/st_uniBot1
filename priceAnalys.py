@@ -96,6 +96,9 @@ class Sale:
 
 # ---------- Filesystem helpers ----------
 
+REST_TIME_FORMAT = "%Y.%m.%d %H:%M:%S"
+
+
 def ensure_directories() -> None:
     for path in [
         config.HTML_APPROVE_DIR,
@@ -113,6 +116,31 @@ def safe_filename(name: str) -> str:
 
 
 # ---------- DB helpers ----------
+
+
+def serialize_rest_until(rest_until_ts: float) -> str:
+    """Преобразует таймстамп отдыха в формат YYYY.MM.DD HH:MM:SS."""
+
+    if rest_until_ts <= 0:
+        return ""
+    return datetime.fromtimestamp(rest_until_ts).strftime(REST_TIME_FORMAT)
+
+
+def deserialize_rest_until(value: Any) -> float:
+    """Возвращает таймстамп отдыха из БД (строка в привычном формате или число)."""
+
+    if not value:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        dt = datetime.strptime(str(value), REST_TIME_FORMAT)
+        return dt.timestamp()
+    except ValueError:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
@@ -185,7 +213,7 @@ def init_db() -> None:
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             address             TEXT UNIQUE,
             last_used_ts        REAL,
-            rest_until_ts       REAL,
+            rest_until_ts       TEXT,
             fail_stage          INTEGER DEFAULT 0,
             fallback_fail_count INTEGER DEFAULT 0,
             disabled            INTEGER DEFAULT 0
@@ -246,7 +274,7 @@ def upsert_proxy(address: str) -> None:
         """
         INSERT OR IGNORE INTO proxies(address, last_used_ts, rest_until_ts, fail_stage,
                                       fallback_fail_count, disabled)
-        VALUES(?, 0, 0, 0, 0, 0)
+        VALUES(?, 0, '', 0, 0, 0)
         """,
         (address,),
     )
@@ -1992,7 +2020,7 @@ def update_proxy_row(
         params.append(last_used_ts)
     if rest_until_ts is not None:
         sets.append("rest_until_ts = ?")
-        params.append(rest_until_ts)
+        params.append(serialize_rest_until(rest_until_ts))
     if fail_stage is not None:
         sets.append("fail_stage = ?")
         params.append(fail_stage)
@@ -2168,7 +2196,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             else:
                 use_direct = False
                 proxy_id = row["id"]
-                rest_until_ts = row["rest_until_ts"] or 0.0
+                rest_until_ts = deserialize_rest_until(row["rest_until_ts"])
                 last_used_ts = row["last_used_ts"] or 0.0
                 fail_stage = row["fail_stage"] or 0
                 fallback_fail_count = row["fallback_fail_count"] or 0
