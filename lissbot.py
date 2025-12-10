@@ -210,7 +210,9 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
             f"[LISS] новочек: {name} прошел фильтры, запускаем парсинг Steam (price={price:.2f})"
         )
 
-        result = priceAnalys.parsing_steam_sales(steam_url)
+        result = priceAnalys.parsing_steam_sales(
+            steam_url, log_blacklist_reason=False
+        )
         status = result.get("status")
 
         if status == "invalid_link":
