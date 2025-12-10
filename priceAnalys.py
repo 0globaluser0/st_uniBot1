@@ -2353,20 +2353,29 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     """
     ensure_directories()
 
+    def finalize_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload["proxy_tag"] = LOG_CONTEXT.get("proxy_tag")
+        set_proxy_tag(None)
+        return payload
+
     url = url.strip()
     if not (url.startswith("http://") or url.startswith("https://")):
-        return {
-            "status": "invalid_link",
-            "message": "not correct link",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link",
+                "item_name": None,
+            }
+        )
 
     if "steamcommunity.com/market/listings/" not in url:
-        return {
-            "status": "invalid_link",
-            "message": "not correct link",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link",
+                "item_name": None,
+            }
+        )
 
     game_code = None
     item_encoded = None
@@ -2381,20 +2390,24 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
         game_code = 570
         item_encoded = m_570.group(1)
     else:
-        return {
-            "status": "invalid_link",
-            "message": "not correct link (dont found game code)",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link (dont found game code)",
+                "item_name": None,
+            }
+        )
 
     item_name = unquote(item_encoded)
 
     if game_code == 570:
-        return {
-            "status": "dota_soon",
-            "message": "dota soon",
-            "item_name": item_name,
-        }
+        return finalize_result(
+            {
+                "status": "dota_soon",
+                "message": "dota soon",
+                "item_name": item_name,
+            }
+        )
 
     # --- Проверяем кэш ---
     row = get_cached_item(item_name)
@@ -2414,15 +2427,17 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
                     f"tier={row['tier']}, type={row['graph_type']} "
                     f"(возраст {age_hours:.2f} ч)"
                 )
-                return {
-                    "status": "ok",
-                    "item_name": item_name,
-                    "rec_price": float(row["rec_price"]),
-                    "avg_sales": float(row["avg_sales"]),
-                    "tier": int(row["tier"]),
-                    "graph_type": row["graph_type"],
-                    "message": "from_cache",
-                }
+                return finalize_result(
+                    {
+                        "status": "ok",
+                        "item_name": item_name,
+                        "rec_price": float(row["rec_price"]),
+                        "avg_sales": float(row["avg_sales"]),
+                        "tier": int(row["tier"]),
+                        "graph_type": row["graph_type"],
+                        "message": "from_cache",
+                    }
+                )
 
     # --- Проверяем блэклист ---
     bl_info = get_active_blacklist_entry(item_name)
@@ -2434,11 +2449,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. "
             f"reason={reason} (source={bl_info['source']})"
         )
-        return {
-            "status": "blacklist",
-            "item_name": item_name,
-            "reason": reason,
-        }
+        return finalize_result(
+            {
+                "status": "blacklist",
+                "item_name": item_name,
+                "reason": reason,
+            }
+        )
 
     # --- Скачиваем HTML ---
     try:
@@ -2446,13 +2463,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     except Exception as e:
         msg = f"Ошибка при скачивании HTML: {e}"
         print(f"[ERROR] {msg}")
-        return {
-            "status": "error",
-            "item_name": item_name,
-            "message": msg,
-        }
-    finally:
-        set_proxy_tag(None)
+        return finalize_result(
+            {
+                "status": "error",
+                "item_name": item_name,
+                "message": msg,
+            }
+        )
 
     # --- Парсим продажи ---
     sales: List[Sale] = []
@@ -2485,23 +2502,27 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
 
         msg = f"Не удалось распарсить продажи после нескольких попыток. last_error={last_error}"
         print(f"[ERROR] {msg}")
-        return {
-            "status": "error",
-            "item_name": item_name,
-            "message": msg,
-        }
+        return finalize_result(
+            {
+                "status": "error",
+                "item_name": item_name,
+                "message": msg,
+            }
+        )
 
     metrics = compute_basic_metrics(sales)
 
     total_amount_30d = sum(s.amount for s in sales)
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            base_price=metrics.get("base_price"),
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                base_price=metrics.get("base_price"),
+                log_reason=log_blacklist_reason,
+            )
         )
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
@@ -2518,8 +2539,10 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             f">= {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h within "
             f"{config.GAP_FILTER_WINDOW_DAYS}d; max_gap={max_gap_hours:.1f}h)"
         )
-        return blacklist_with_html(
-            item_name, reason, html, base_price=metrics.get("base_price")
+        return finalize_result(
+            blacklist_with_html(
+                item_name, reason, html, base_price=metrics.get("base_price")
+            )
         )
     dips = compute_price_dips(sales, metrics)
 
@@ -2543,11 +2566,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     if shape_result["status"] == "blacklist":
         reason = shape_result["reason"]
         #print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            base_price=metrics.get("base_price"),
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                base_price=metrics.get("base_price"),
+            )
         )
 
     rec_price = float(shape_result["rec_price"])
@@ -2587,13 +2612,15 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             "rec_price_below_minimum "
             f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
         )
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
-            rec_price_blacklist=True,
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+                rec_price_blacklist=True,
+                log_reason=log_blacklist_reason,
+            )
         )
 
     if rec_price < config.MIN_REC_PRICE_USD2:
@@ -2601,13 +2628,15 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             "rec_price_below_secondary_minimum "
             f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
         )
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
-            rec_price_blacklist=True,
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+                rec_price_blacklist=True,
+                log_reason=log_blacklist_reason,
+            )
         )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
@@ -2638,12 +2667,14 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     except Exception:
         pass
 
-    return {
-        "status": "ok",
-        "item_name": item_name,
-        "rec_price": rec_price,
-        "avg_sales": avg_sales,
-        "tier": tier,
-        "graph_type": graph_type,
-        "message": reason,
-    }
+    return finalize_result(
+        {
+            "status": "ok",
+            "item_name": item_name,
+            "rec_price": rec_price,
+            "avg_sales": avg_sales,
+            "tier": tier,
+            "graph_type": graph_type,
+            "message": reason,
+        }
+    )

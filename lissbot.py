@@ -239,48 +239,75 @@ def process_new_items(
             steam_url, log_blacklist_reason=False
         )
         status = result.get("status")
+        proxy_tag = result.get("proxy_tag")
 
         if status == "invalid_link":
-            print(f"[LISS][WARN] {name}: некорректная ссылка {steam_url}")
+            print(
+                f"[LISS][WARN] {name}: некорректная ссылка {steam_url}",
+                proxy_tag=proxy_tag,
+            )
             continue
         if status == "dota_soon":
-            print(f"[LISS][INFO] {name}: анализ Dota пока не поддерживается")
+            print(
+                f"[LISS][INFO] {name}: анализ Dota пока не поддерживается",
+                proxy_tag=proxy_tag,
+            )
             continue
         if status == "blacklist":
-            print(f"[LISS][INFO] {name}: в блэклисте ({result.get('reason')})")
+            print(
+                f"[LISS][INFO] {name}: в блэклисте ({result.get('reason')})",
+                proxy_tag=proxy_tag,
+            )
             continue
         if status == "error":
-            print(f"[LISS][ERROR] {name}: {result.get('message')}")
+            print(
+                f"[LISS][ERROR] {name}: {result.get('message')}",
+                proxy_tag=proxy_tag,
+            )
             continue
         if status != "ok":
-            print(f"[LISS][WARN] {name}: неизвестный статус {status}, пропускаем")
+            print(
+                f"[LISS][WARN] {name}: неизвестный статус {status}, пропускаем",
+                proxy_tag=proxy_tag,
+            )
             continue
 
         rec_price = float(result.get("rec_price", 0) or 0)
         avg_sales = float(result.get("avg_sales", 0) or 0)
 
         if not within_purchase_limits(avg_sales, purchased_lots, purchased_sum):
-            print(f"[LISS][INFO] {name}: достигнут лимит покупок")
+            print(
+                f"[LISS][INFO] {name}: достигнут лимит покупок",
+                proxy_tag=proxy_tag,
+            )
             continue
 
         adjusted_rec_price = rec_price * 0.8697
         if adjusted_rec_price <= 0:
-            print(f"[LISS][WARN] {name}: некорректная рек. цена ({rec_price})")
+            print(
+                f"[LISS][WARN] {name}: некорректная рек. цена ({rec_price})",
+                proxy_tag=proxy_tag,
+            )
             continue
 
         if price <= 0:
-            print(f"[LISS][WARN] {name}: некорректная цена лота ({price})")
+            print(
+                f"[LISS][WARN] {name}: некорректная цена лота ({price})",
+                proxy_tag=proxy_tag,
+            )
             continue
 
         profit = adjusted_rec_price / price - 1
         if profit > config.LISS_MIN_PROFIT:
             print(
                 f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
-                "\033[92mapprove\033[0m"
+                "\033[92mapprove\033[0m",
+                proxy_tag=proxy_tag,
             )
         else:
             print(
-                f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога"
+                f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога",
+                proxy_tag=proxy_tag,
             )
 
     priceAnalys.set_progress(None, None)
