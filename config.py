@@ -25,25 +25,25 @@ HTML_TEMP_DIR = "HTML_temp"
 LISS_BLACKLIST_KEYWORDS = []
 
 # Основной и дополнительный фильтры по цене лота, USD
-LISS_MIN_PRICE = 0.0
-LISS_EXTRA_MIN_PRICE = 0.0
-LISS_MAX_PRICE = 1000.0
+LISS_MIN_PRICE = 0.18
+LISS_EXTRA_MIN_PRICE = 0.15
+LISS_MAX_PRICE = 10.0
 
 # Минимально допустимая прибыль лота (((rec_price * 0.8697) / price) - 1)
-LISS_MIN_PROFIT = 0.0
+LISS_MIN_PROFIT = 0.35
 
 # Максимальный срок холда предмета (0–8 дней)
-LISS_MAX_HOLD_DAYS = 0
+LISS_MAX_HOLD_DAYS = 8
 
 # Ограничения по количеству и сумме покупок
-LISS_QUANTITY_PERCENT = 10.0  # доля от средних продаж в неделю на Steam
-LISS_PERIOD_DAYS = 3  # период учёта для лимитов
-LISS_SUM_LIMIT = 50.0  # максимальная сумма покупок одного предмета за период
+LISS_QUANTITY_PERCENT = 30.0  # доля от средних продаж в неделю на Steam
+LISS_PERIOD_DAYS = 7  # период учёта для лимитов
+LISS_SUM_LIMIT = 20.0  # максимальная сумма покупок одного предмета за период
 
 # ------------ Caching / DB freshness ------------
 
 # Сколько часов результат по предмету считается актуальным
-ACTUAL_HOURS = 0.0
+ACTUAL_HOURS = 18.0
 
 # Сколько дней предмет держится в блэклисте
 BLACKLIST_DAYS = 7.0
@@ -53,13 +53,13 @@ BLACKLIST_DAYS = 7.0
 # 0 = без прокси (только прямой IP)
 # 1 = только прокси
 # 2 = прокси + прямой IP как отдельный "прокси" в очереди
-PROXY_SELECT = 0
+PROXY_SELECT = 2
 
 # 1 = без задержки, 0 = учитывать задержку между запросами через один и тот же прокси
 DELAY_OFF = 0
 
 # Минимальная задержка (в секундах) между двумя запросами через один и тот же прокси
-DELAY_HTML = 30.0
+DELAY_HTML = 15.0
 
 # Отдых прокси после первого 429 Too Many Requests
 REST_PROXY1 = 300.0  # 5 минут
