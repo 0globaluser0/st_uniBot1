@@ -84,10 +84,24 @@ def init_db() -> None:
             tier           INTEGER,
             graph_type     TEXT,
             updated_at     TEXT,
-            sales_points   INTEGER
+            sales_points   INTEGER,
+            purchased_lots REAL DEFAULT 0,
+            purchased_sum  REAL DEFAULT 0
         )
         """
     )
+
+    # Добавляем новые поля, если таблица уже существовала
+    cur.execute("PRAGMA table_info(steam_items)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+    if "purchased_lots" not in existing_columns:
+        cur.execute(
+            "ALTER TABLE steam_items ADD COLUMN purchased_lots REAL DEFAULT 0"
+        )
+    if "purchased_sum" not in existing_columns:
+        cur.execute(
+            "ALTER TABLE steam_items ADD COLUMN purchased_sum REAL DEFAULT 0"
+        )
 
     conn.commit()
     conn.close()
