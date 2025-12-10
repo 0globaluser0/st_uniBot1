@@ -27,7 +27,7 @@ LISS_MIN_PRICE = 0.0
 LISS_EXTRA_MIN_PRICE = 0.0
 LISS_MAX_PRICE = 1000.0
 
-# Минимально допустимая прибыль лота ((price / (rec_price * 0.8697)) - 1)
+# Минимально допустимая прибыль лота (((rec_price * 0.8697) / price) - 1)
 LISS_MIN_PROFIT = 0.0
 
 # Максимальный срок холда предмета (0–8 дней)
