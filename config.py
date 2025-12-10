@@ -26,7 +26,7 @@ REC_PRICE_LOG_DETAILS = 0
 # ------------ Liss bot settings ------------
 
 # Список ключевых слов, при наличии которых предмет отбрасывается
-LISS_BLACKLIST_KEYWORDS = []
+LISS_BLACKLIST_KEYWORDS = ["knife","charm","tag"]
 
 # Основной и дополнительный фильтры по цене лота, USD
 LISS_MIN_PRICE = 0.18
