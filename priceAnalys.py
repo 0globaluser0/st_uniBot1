@@ -23,6 +23,13 @@ direct_ip_state = {
 }
 
 
+def log_rec_detail(message: str) -> None:
+    """Выводит подробные логи расчёта рек. цены при включённом флаге."""
+
+    if config.REC_PRICE_LOG_DETAILS:
+        print(message)
+
+
 @dataclass
 class Sale:
     dt: datetime
@@ -322,6 +329,16 @@ def _base_price_blacklist_redirect(
     return False, days, reason
 
 
+RED = "\033[91m"
+RESET = "\033[0m"
+
+
+def log_proxy_rest(address: str, reason: str, rest_seconds: float) -> None:
+    print(
+        f"{RED}[PROXY][REST] {address}: {reason}; отдых {int(rest_seconds)} сек.{RESET}"
+    )
+
+
 def blacklist_with_html(
     item_name: str,
     reason: str,
@@ -330,6 +347,7 @@ def blacklist_with_html(
     *,
     rec_price_blacklist: bool = False,
     base_price: Optional[float] = None,
+    log_reason: bool = True,
 ) -> Dict[str, str]:
     """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
 
@@ -337,7 +355,8 @@ def blacklist_with_html(
         redirect, days, reason = _base_price_blacklist_redirect(reason, base_price, days)
         rec_price_blacklist = redirect or rec_price_blacklist
 
-    print(f"[ANALYSIS] {item_name}: {reason}")
+    if log_reason:
+        print(f"[ANALYSIS] {item_name}: {reason}")
     add_to_blacklist(item_name, reason, days=days, rec_price=rec_price_blacklist)
     html_path = os.path.join(
         config.HTML_BLACKLIST_DIR,
@@ -1315,20 +1334,21 @@ def enforce_rec_price_sales_support(
             t += step_window
 
         if period_violations:
-            print(
+            log_rec_detail(
                 "[REC_SUPPORT] Нарушения поддержки продаж: период последних "
                 f"{period_cfg['HOURS']}ч, rec_price={period_rec_price:.2f}, "
                 f"step={period_cfg['STEP_WINDOW_HOURS']}ч"
             )
-            for v in period_violations:
-                print(
-                    "    окно "
-                    f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
-                    f"candidate_price={v['candidate_price']:.2f}, "
-                    f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
-                    f"(объём>=rec_price: {v['support_vol']:.2f}) "
-                    f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
-                )
+            if config.REC_PRICE_LOG_DETAILS:
+                for v in period_violations:
+                    print(
+                        "    окно "
+                        f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
+                        f"candidate_price={v['candidate_price']:.2f}, "
+                        f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
+                        f"(объём>=rec_price: {v['support_vol']:.2f}) "
+                        f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
+                    )
 
         if len(violating_candidates) > allowed_violations:
             violating_candidates.sort()
@@ -1514,7 +1534,7 @@ def classify_shape_basic(
         post_trend_factor = 1.0 if use_dip_price else stable_trend_factor
         final_rec_price = chosen_supported_price * post_trend_factor
 
-        print(
+        log_rec_detail(
             f"[REC_PRICE] old_dip_dips: dip_supported={dip_supported_price:.4f}, "
             f"stable_supported={stable_supported_price:.4f}, "
             f"chosen={'dip' if use_dip_price else 'stable'}, "
@@ -1645,7 +1665,7 @@ def classify_shape_basic(
         chosen_sales = rec_price_sales if use_dip_price else stable_sales
         post_trend_factor = 1.0 if use_dip_price else stable_trend_factor
 
-        print(
+        log_rec_detail(
             f"[REC_PRICE] wave: dip_based={dip_final_price:.4f}, "
             f"stable_like={stable_final_price:.4f}, chosen={'dip' if use_dip_price else 'stable'}"
         )
@@ -1826,7 +1846,7 @@ def parse_sales_from_html(item_name: str, html_text: str) -> List[Sale]:
     cutoff = last_dt - timedelta(days=30)
     sales_30d = [s for s in sales if s.dt >= cutoff]
 
-    print(f"[DOWNLOAD] Успешно спарсили {len(sales_30d)} записей продаж за последние 30 дней.")
+    #print(f"[DOWNLOAD] Успешно спарсили {len(sales_30d)} записей продаж за последние 30 дней.")
     dump_sales_debug(item_name, sales_30d)
 
     return sales_30d
@@ -1991,7 +2011,9 @@ def direct_is_resting(now_ts: Optional[float] = None) -> bool:
     return direct_ip_state["rest_until_ts"] > now_ts
 
 
-def send_direct_to_rest(now_ts: Optional[float] = None) -> None:
+def send_direct_to_rest(
+    now_ts: Optional[float] = None, reason: str = "429 Too Many Requests"
+) -> None:
     """Отправляет прямой IP на отдых по той же схеме, что и прокси."""
     if now_ts is None:
         now_ts = time.time()
@@ -1999,15 +2021,11 @@ def send_direct_to_rest(now_ts: Optional[float] = None) -> None:
     if direct_ip_state["fail_stage"] == 0:
         rest_until = now_ts + config.REST_PROXY1
         stage = 1
-        print(
-            f"[PROXY] Отправляем прямой IP на первый отдых на {config.REST_PROXY1} сек."
-        )
+        log_proxy_rest("DIRECT", reason, config.REST_PROXY1)
     else:
         rest_until = now_ts + config.REST_PROXY2
         stage = 2
-        print(
-            f"[PROXY] Отправляем прямой IP на второй отдых на {config.REST_PROXY2} сек."
-        )
+        log_proxy_rest("DIRECT", reason, config.REST_PROXY2)
 
     direct_ip_state["rest_until_ts"] = rest_until
     direct_ip_state["fail_stage"] = stage
@@ -2056,7 +2074,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 resp = e.response
                 if resp is not None and resp.status_code == 429:
                     last_error_html = resp.text
-                    send_direct_to_rest(now_ts)
+                    send_direct_to_rest(now_ts, reason="429 Too Many Requests")
                     continue
                 print(f"[DOWNLOAD] Ошибка прямого скачивания (попытка {attempt}): {e}")
                 time.sleep(config.DELAY_DOWNLOAD_ERROR)
@@ -2099,7 +2117,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
     while attempt < config.MAX_HTML_RETRIES:
         attempt += 1
-        print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
+ #       print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
 
         for offset in range(cycle_len):
             idx = (start_index + offset) % cycle_len
@@ -2125,17 +2143,17 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             if rest_until_ts > now_ts:
                 remain = int(rest_until_ts - now_ts)
                 label = "прямой IP" if use_direct else f"прокси {row['address']}"
-                print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
+               # print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
                 continue
 
             if not config.DELAY_OFF and not use_direct and last_used_ts > 0:
                 delta = now_ts - last_used_ts
                 if delta < config.DELAY_HTML:
                     wait_sec = int(config.DELAY_HTML - delta)
-                    print(
-                        f"[PROXY] Высокая нагрузка на прокси {row['address']}, "
-                        f"ждём {wait_sec} сек."
-                    )
+                    #print(
+                    #    f"[PROXY] Высокая нагрузка на прокси {row['address']}, "
+                    #    f"ждём {wait_sec} сек."
+                    #)
                     time.sleep(max(wait_sec, 1))
 
             try:
@@ -2144,7 +2162,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     print("[PROXY] Используем прямой IP.")
                 else:
                     proxies = build_requests_proxy(row["address"])
-                    print(f"[PROXY] Используем прокси {row['address']}.")
+                   #print(f"[PROXY] Используем прокси {row['address']}.")
 
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2160,18 +2178,15 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 if resp.status_code == 429:
                     text = resp.text
                     last_error_html = text
-                    print(f"[PROXY] 429 Too Many Requests от {row['address'] if not use_direct else 'DIRECT'}.")
+                    reason = "429 Too Many Requests"
 
                     if use_direct:
-                        send_direct_to_rest()
+                        send_direct_to_rest(reason=reason)
                     elif proxy_id is not None:
                         now_ts = time.time()
                         if fail_stage == 0:
                             rest_until = now_ts + config.REST_PROXY1
-                            print(
-                                f"[PROXY] Отправляем прокси {row['address']} "
-                                f"на первый отдых на {config.REST_PROXY1} сек."
-                            )
+                            log_proxy_rest(row["address"], reason, config.REST_PROXY1)
                             update_proxy_row(
                                 proxy_id,
                                 rest_until_ts=rest_until,
@@ -2179,10 +2194,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                             )
                         else:
                             rest_until = now_ts + config.REST_PROXY2
-                            print(
-                                f"[PROXY] Отправляем прокси {row['address']} "
-                                f"на второй отдых на {config.REST_PROXY2} сек."
-                            )
+                            log_proxy_rest(row["address"], reason, config.REST_PROXY2)
                             update_proxy_row(
                                 proxy_id,
                                 rest_until_ts=rest_until,
@@ -2224,18 +2236,16 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                         now_ts = time.time()
                         rest_until = now_ts + config.REST_PROXY1
                         fallback_fail_count += 1
-                        print(
-                            f"[PROXY] Прокси {row['address']} отправляется на отдых "
-                            f"на {config.REST_PROXY1} сек. "
-                            f"(fallback_fail_count={fallback_fail_count})"
+                        reason = (
+                            "ошибка соединения, прямой IP ответил"
+                            f" (fallback_fail_count={fallback_fail_count})"
                         )
+                        log_proxy_rest(row["address"], reason, config.REST_PROXY1)
                         disabled_flag = 0
                         if fallback_fail_count >= config.MAX_FALLBACK_FAILS:
                             disabled_flag = 1
-                            print(
-                                f"[PROXY] Прокси {row['address']} "
-                                f"навсегда отключен (слишком много сбоев)."
-                            )
+                            reason = "ошибка соединения, прокси отключён"
+                            log_proxy_rest(row["address"], reason, 0)
                         update_proxy_row(
                             proxy_id,
                             rest_until_ts=rest_until,
@@ -2259,17 +2269,15 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                                 "[DOWNLOAD] Прямой IP вернул 429 при проверке соединения; "
                                 "считаем, что соединение есть."
                             )
-                            send_direct_to_rest()
+                            send_direct_to_rest(reason="429 Too Many Requests")
                             now_ts = time.time()
                             rest_until = now_ts + config.REST_PROXY1
                             fallback_fail_count += 1
                             disabled_flag = 0
                             if fallback_fail_count >= config.MAX_FALLBACK_FAILS:
                                 disabled_flag = 1
-                                print(
-                                    f"[PROXY] Прокси {row['address']} "
-                                    f"навсегда отключен (слишком много сбоев)."
-                                )
+                                reason = "ошибка соединения, прокси отключён"
+                                log_proxy_rest(row["address"], reason, 0)
                             update_proxy_row(
                                 proxy_id,
                                 rest_until_ts=rest_until,
@@ -2307,7 +2315,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
 # ---------- Основная функция парсинга и анализа ----------
 
-def parsing_steam_sales(url: str) -> Dict[str, Any]:
+def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[str, Any]:
     """
     Главная функция.
     1) Проверяет ссылку.
@@ -2462,7 +2470,11 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
         return blacklist_with_html(
-            item_name, reason, html, base_price=metrics.get("base_price")
+            item_name,
+            reason,
+            html,
+            base_price=metrics.get("base_price"),
+            log_reason=log_blacklist_reason,
         )
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
@@ -2484,7 +2496,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         )
     dips = compute_price_dips(sales, metrics)
 
-    print(
+    log_rec_detail(
         f"[ANALYSIS] {item_name}: base={metrics['base_price']:.4f}, "
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
         f"cv={metrics['cv_price']:.3f}, \n"
@@ -2503,7 +2515,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
 
     if shape_result["status"] == "blacklist":
         reason = shape_result["reason"]
-        print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
+        #print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
         return blacklist_with_html(
             item_name,
             reason,
@@ -2526,7 +2538,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         periods_override=periods_override,
     )
     if adjusted_rec_price != rec_price:
-        print(
+        log_rec_detail(
             f"[ADJUST] rec_price lowered from {rec_price:.4f} to {adjusted_rec_price:.4f} "
             "to satisfy sales support."
         )
@@ -2535,7 +2547,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     trend_factor = shape_result.get("post_support_trend_factor", 1.0)
     if trend_factor != 1.0:
         rec_price *= trend_factor
-        print(
+        log_rec_detail(
             f"[ADJUST] rec_price trend forecast factor applied: x{trend_factor:.3f}; "
             f"new rec_price={rec_price:.4f}"
         )
@@ -2554,6 +2566,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             html,
             days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
             rec_price_blacklist=True,
+            log_reason=log_blacklist_reason,
         )
 
     if rec_price < config.MIN_REC_PRICE_USD2:
@@ -2567,15 +2580,16 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             html,
             days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
             rec_price_blacklist=True,
+            log_reason=log_blacklist_reason,
         )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
 
-    print(
-        f"[RESULT] OK. {item_name}: type={graph_type}, tier={tier}, "
-        f"rec_price={rec_price:.4f} USD, avg_sales={avg_sales:.2f}"
-    )
-    print(f"[REASON] {reason}")
+    #print(
+    #    f"[RESULT] OK. {item_name}: type={graph_type}, tier={tier}, "
+    #    f"rec_price={rec_price:.4f} USD, avg_sales={avg_sales:.2f}"
+    #)
+    log_rec_detail(f"[REASON] {reason}")
 
     save_item_result(
         item_name=item_name,
