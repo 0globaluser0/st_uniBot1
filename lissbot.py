@@ -7,6 +7,7 @@
 
 import json
 import sys
+import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
 from urllib.parse import quote
@@ -130,18 +131,24 @@ def within_purchase_limits(avg_sales: float, purchased_lots: float, purchased_su
     return purchased_lots < allowed_lots and purchased_sum < config.LISS_SUM_LIMIT
 
 
-def evaluate_known_items(market_items: List[Dict[str, object]], known_items: List[Dict[str, object]]) -> List[str]:
+def evaluate_known_items(
+    market_items: List[Dict[str, object]],
+    known_items: List[Dict[str, object]],
+) -> Tuple[List[str], int, int]:
     market_map = {item["name"]: item for item in market_items}
+    candidates = [item for item in known_items if item["name"] in market_map]
     processed: List[str] = []
+    passed_filters = 0
+    profit_passed = 0
 
     green = "\033[92m"
     reset = "\033[0m"
 
-    for known in known_items:
+    total = len(candidates)
+    for idx, known in enumerate(candidates, start=1):
+        priceAnalys.set_progress(idx, total)
         name = known["name"]
         market_item = market_map.get(name)
-        if not market_item:
-            continue
 
         processed.append(name)
 
@@ -161,13 +168,18 @@ def evaluate_known_items(market_items: List[Dict[str, object]], known_items: Lis
 
         profit = adjusted_rec_price / price - 1
         if profit > config.LISS_MIN_PROFIT:
+            passed_filters += 1
             print(
                 f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
                 f"{green}approve{reset}"
             )
             print("[LISS] предчек: предмет прошел фильтры и готов к парсингу id")
+            profit_passed += 1
+        else:
+            passed_filters += 1
 
-    return processed
+    priceAnalys.set_progress(None, None)
+    return processed, passed_filters, profit_passed
 
 
 def get_purchase_stats(name: str) -> Tuple[float, float, float]:
@@ -186,9 +198,12 @@ def get_purchase_stats(name: str) -> Tuple[float, float, float]:
     return float(row["avg_sales"] or 0), float(row["purchased_lots"] or 0), float(row["purchased_sum"] or 0)
 
 
-def process_new_items(market_items: List[Dict[str, object]], processed_names: Iterable[str]) -> None:
+def process_new_items(
+    market_items: List[Dict[str, object]], processed_names: Iterable[str]
+) -> None:
     processed_set = set(processed_names)
 
+    targets: List[Dict[str, object]] = []
     for item in market_items:
         name = item["name"]
         price = float(item["price"])
@@ -200,10 +215,20 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
             continue
 
         avg_sales, purchased_lots, purchased_sum = get_purchase_stats(name)
-        if avg_sales > 0 and not within_purchase_limits(avg_sales, purchased_lots, purchased_sum):
+        if avg_sales > 0 and not within_purchase_limits(
+            avg_sales, purchased_lots, purchased_sum
+        ):
             continue
         if purchased_sum >= config.LISS_SUM_LIMIT:
             continue
+
+        targets.append(item)
+
+    total = len(targets)
+    for idx, item in enumerate(targets, start=1):
+        priceAnalys.set_progress(idx, total)
+        name = item["name"]
+        price = float(item["price"])
 
         steam_url = build_steam_url(name)
 #         print(
@@ -258,21 +283,53 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
                 f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога"
             )
 
+    priceAnalys.set_progress(None, None)
+
 
 def main() -> None:
     priceAnalys.init_db()
     priceAnalys.load_proxies_from_file()
 
-    try:
-        market_items = fetch_market_items()
-    except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
-        print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
-        sys.exit(1)
+    refresh_seconds = max(60, int(config.PRICE_REFRESH_MINUTES * 60))
+    orange = "\033[38;5;208m"
+    reset = "\033[0m"
 
-    filtered_items = filter_by_keywords_and_price(market_items)
-    known_items = load_known_items()
-    processed_names = evaluate_known_items(filtered_items, known_items)
-    process_new_items(filtered_items, processed_names)
+    while True:
+        priceAnalys.set_proxy_tag(None)
+        priceAnalys.set_progress(None, None)
+        print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
+
+        try:
+            market_items = fetch_market_items()
+        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
+            print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
+            try:
+                time.sleep(refresh_seconds)
+            except KeyboardInterrupt:
+                print("[LISS] Остановка по запросу пользователя.")
+                sys.exit(0)
+            continue
+
+        filtered_items = filter_by_keywords_and_price(market_items)
+        known_items = load_known_items()
+        processed_names, passed_filters, profit_passed = evaluate_known_items(
+            filtered_items, known_items
+        )
+        remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
+        print(
+            "[LISS][SUMMARY] Предчек завершён: "
+            f"пройдено предчек {len(processed_names)}, "
+            f"фильтры предчека {passed_filters}, "
+            f"по прибыли {profit_passed}, "
+            f"для новочек осталось {remaining_for_newcheck}"
+        )
+        process_new_items(filtered_items, processed_names)
+
+        try:
+            time.sleep(refresh_seconds)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
 
 
 if __name__ == "__main__":
