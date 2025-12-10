@@ -349,6 +349,8 @@ def main() -> None:
 
     while True:
         iteration_started_at = time.time()
+        next_refresh_at = iteration_started_at + refresh_seconds
+
         try:
             run_refresh_cycle(refresh_seconds, orange, reset)
         except KeyboardInterrupt:
@@ -357,8 +359,11 @@ def main() -> None:
         except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
             print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
 
-        elapsed = time.time() - iteration_started_at
-        sleep_time = max(refresh_seconds - int(elapsed), 0)
+        now = time.time()
+        sleep_time = max(next_refresh_at - now, 0)
+        if sleep_time == 0:
+            print("[LISS][TIMER] Следующий парсинг запускается без ожидания (таймер истёк во время цикла).")
+
         try:
             if sleep_time > 0:
                 time.sleep(sleep_time)
