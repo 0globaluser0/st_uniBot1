@@ -289,6 +289,39 @@ def add_to_blacklist(
     conn.close()
 
 
+def _base_price_blacklist_redirect(
+    reason: str, base_price: Optional[float], days: Optional[float]
+) -> Tuple[bool, Optional[float], str]:
+    """Проверяет пороги по base_price и возвращает параметры для блэклиста по рек. цене."""
+
+    if base_price is None:
+        return False, days, reason
+
+    if base_price < config.MIN_REC_PRICE_USD1:
+        new_reason = (
+            "base_price_below_minimum "
+            f"({base_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
+        )
+        return (
+            True,
+            config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+            f"{new_reason}; original_reason={reason}",
+        )
+
+    if base_price < config.MIN_REC_PRICE_USD2:
+        new_reason = (
+            "base_price_below_secondary_minimum "
+            f"({base_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
+        )
+        return (
+            True,
+            config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+            f"{new_reason}; original_reason={reason}",
+        )
+
+    return False, days, reason
+
+
 def blacklist_with_html(
     item_name: str,
     reason: str,
@@ -296,8 +329,14 @@ def blacklist_with_html(
     days: Optional[float] = None,
     *,
     rec_price_blacklist: bool = False,
+    base_price: Optional[float] = None,
 ) -> Dict[str, str]:
     """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
+
+    if not rec_price_blacklist:
+        redirect, days, reason = _base_price_blacklist_redirect(reason, base_price, days)
+        rec_price_blacklist = redirect or rec_price_blacklist
+
     print(f"[ANALYSIS] {item_name}: {reason}")
     add_to_blacklist(item_name, reason, days=days, rec_price=rec_price_blacklist)
     html_path = os.path.join(
@@ -2383,10 +2422,14 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             "message": msg,
         }
 
+    metrics = compute_basic_metrics(sales)
+
     total_amount_30d = sum(s.amount for s in sales)
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
-        return blacklist_with_html(item_name, reason, html)
+        return blacklist_with_html(
+            item_name, reason, html, base_price=metrics.get("base_price")
+        )
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
     # чтобы предмет моментально отправлялся в блэклист без дальнейшего анализа.
@@ -2402,9 +2445,9 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             f">= {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h within "
             f"{config.GAP_FILTER_WINDOW_DAYS}d; max_gap={max_gap_hours:.1f}h)"
         )
-        return blacklist_with_html(item_name, reason, html)
-
-    metrics = compute_basic_metrics(sales)
+        return blacklist_with_html(
+            item_name, reason, html, base_price=metrics.get("base_price")
+        )
     dips = compute_price_dips(sales, metrics)
 
     print(
@@ -2427,21 +2470,12 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     if shape_result["status"] == "blacklist":
         reason = shape_result["reason"]
         print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
-        add_to_blacklist(item_name, reason)
-        html_path = os.path.join(
-            config.HTML_BLACKLIST_DIR,
-            f"{safe_filename(item_name)}.html",
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            base_price=metrics.get("base_price"),
         )
-        try:
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(html)
-        except Exception:
-            pass
-        return {
-            "status": "blacklist",
-            "item_name": item_name,
-            "reason": reason,
-        }
 
     rec_price = float(shape_result["rec_price"])
     rec_price_sales = shape_result.get("rec_price_sales", [])
