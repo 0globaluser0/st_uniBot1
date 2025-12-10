@@ -49,6 +49,12 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_proxy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.PROXY_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def get_blacklist_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.BLACKLIST_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -76,8 +82,13 @@ def init_db() -> None:
         """
     )
 
-    # Таблица прокси
-    cur.execute(
+    conn.commit()
+    conn.close()
+
+    # Таблица прокси в отдельной базе
+    proxy_conn = get_proxy_conn()
+    proxy_cur = proxy_conn.cursor()
+    proxy_cur.execute(
         """
         CREATE TABLE IF NOT EXISTS proxies (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,9 +101,19 @@ def init_db() -> None:
         )
         """
     )
-
-    conn.commit()
-    conn.close()
+    proxy_cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proxy_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_position INTEGER DEFAULT -1
+        )
+        """
+    )
+    proxy_cur.execute(
+        "INSERT OR IGNORE INTO proxy_state(id, last_position) VALUES(1, -1)"
+    )
+    proxy_conn.commit()
+    proxy_conn.close()
 
     # Таблица блэклиста в отдельной базе
     bl_conn = get_blacklist_conn()
@@ -112,7 +133,7 @@ def init_db() -> None:
 
 
 def upsert_proxy(address: str) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -1724,12 +1745,31 @@ def dump_sales_debug(item_name: str, sales: List[Sale]) -> None:
 # (эта часть не менялась, оставляю как в предыдущей версии)
 
 def get_all_proxies() -> List[sqlite3.Row]:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM proxies WHERE disabled = 0 ORDER BY id ASC")
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_last_proxy_position() -> int:
+    conn = get_proxy_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT last_position FROM proxy_state WHERE id = 1")
+    row = cur.fetchone()
+    conn.close()
+    if row is None or row["last_position"] is None:
+        return -1
+    return int(row["last_position"])
+
+
+def set_last_proxy_position(position: int) -> None:
+    conn = get_proxy_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE proxy_state SET last_position = ? WHERE id = 1", (position,))
+    conn.commit()
+    conn.close()
 
 
 def update_proxy_row(
@@ -1741,7 +1781,7 @@ def update_proxy_row(
     fallback_fail_count: Optional[int] = None,
     disabled: Optional[int] = None,
 ) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
 
     sets = []
@@ -1847,7 +1887,10 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     if cycle_len == 0:
         return fetch_html_direct(url)
 
-    start_index = 0
+    last_position = get_last_proxy_position()
+    if last_position < -1:
+        last_position = -1
+    start_index = (last_position + 1) % cycle_len
     attempt = 0
     last_error_html: Optional[str] = None
 
@@ -1954,6 +1997,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 with open(temp_path, "w", encoding="utf-8") as f:
                     f.write(html)
 
+                set_last_proxy_position(idx)
                 return html
 
             except requests.RequestException as e:
@@ -1994,6 +2038,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                         with open(temp_path, "w", encoding="utf-8") as f:
                             f.write(html)
 
+                        set_last_proxy_position(idx)
                         return html
                     except requests.RequestException as e2:
                         print(
