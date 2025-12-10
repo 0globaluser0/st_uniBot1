@@ -16,6 +16,13 @@ import requests
 import config
 
 
+# Состояние прямого IP для логики отдыха (как для прокси)
+direct_ip_state = {
+    "rest_until_ts": 0.0,
+    "fail_stage": 0,
+}
+
+
 @dataclass
 class Sale:
     dt: datetime
@@ -49,8 +56,20 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_proxy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.PROXY_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def get_blacklist_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.BLACKLIST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def get_rec_price_blacklist_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.REC_PRICE_BLACKLIST_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -71,13 +90,32 @@ def init_db() -> None:
             tier           INTEGER,
             graph_type     TEXT,
             updated_at     TEXT,
-            sales_points   INTEGER
+            sales_points   INTEGER,
+            purchased_lots REAL DEFAULT 0,
+            purchased_sum  REAL DEFAULT 0
         )
         """
     )
 
-    # Таблица прокси
-    cur.execute(
+    # Добавляем новые поля, если таблица уже существовала
+    cur.execute("PRAGMA table_info(steam_items)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+    if "purchased_lots" not in existing_columns:
+        cur.execute(
+            "ALTER TABLE steam_items ADD COLUMN purchased_lots REAL DEFAULT 0"
+        )
+    if "purchased_sum" not in existing_columns:
+        cur.execute(
+            "ALTER TABLE steam_items ADD COLUMN purchased_sum REAL DEFAULT 0"
+        )
+
+    conn.commit()
+    conn.close()
+
+    # Таблица прокси в отдельной базе
+    proxy_conn = get_proxy_conn()
+    proxy_cur = proxy_conn.cursor()
+    proxy_cur.execute(
         """
         CREATE TABLE IF NOT EXISTS proxies (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,9 +128,19 @@ def init_db() -> None:
         )
         """
     )
-
-    conn.commit()
-    conn.close()
+    proxy_cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proxy_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_position INTEGER DEFAULT -1
+        )
+        """
+    )
+    proxy_cur.execute(
+        "INSERT OR IGNORE INTO proxy_state(id, last_position) VALUES(1, -1)"
+    )
+    proxy_conn.commit()
+    proxy_conn.close()
 
     # Таблица блэклиста в отдельной базе
     bl_conn = get_blacklist_conn()
@@ -110,9 +158,25 @@ def init_db() -> None:
     bl_conn.commit()
     bl_conn.close()
 
+    # Таблица блэклиста по рек. цене в отдельной базе
+    rec_bl_conn = get_rec_price_blacklist_conn()
+    rec_bl_cur = rec_bl_conn.cursor()
+    rec_bl_cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blacklist (
+            item_name  TEXT PRIMARY KEY,
+            added_at   TEXT,
+            expires_at TEXT,
+            reason     TEXT
+        )
+        """
+    )
+    rec_bl_conn.commit()
+    rec_bl_conn.close()
+
 
 def upsert_proxy(address: str) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute(
         """
@@ -198,10 +262,17 @@ def save_item_result(
     conn.close()
 
 
-def add_to_blacklist(item_name: str, reason: str) -> None:
+def _select_blacklist_conn(rec_price: bool) -> sqlite3.Connection:
+    return get_rec_price_blacklist_conn() if rec_price else get_blacklist_conn()
+
+
+def add_to_blacklist(
+    item_name: str, reason: str, days: Optional[float] = None, *, rec_price: bool = False
+) -> None:
     now = datetime.utcnow()
-    expires = now + timedelta(days=config.BLACKLIST_DAYS)
-    conn = get_blacklist_conn()
+    duration_days = config.BLACKLIST_DAYS if days is None else days
+    expires = now + timedelta(days=duration_days)
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute(
         """
@@ -218,10 +289,56 @@ def add_to_blacklist(item_name: str, reason: str) -> None:
     conn.close()
 
 
-def blacklist_with_html(item_name: str, reason: str, html: str) -> Dict[str, str]:
+def _base_price_blacklist_redirect(
+    reason: str, base_price: Optional[float], days: Optional[float]
+) -> Tuple[bool, Optional[float], str]:
+    """Проверяет пороги по base_price и возвращает параметры для блэклиста по рек. цене."""
+
+    if base_price is None:
+        return False, days, reason
+
+    if base_price < config.MIN_REC_PRICE_USD1:
+        new_reason = (
+            "base_price_below_minimum "
+            f"({base_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
+        )
+        return (
+            True,
+            config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+            f"{new_reason}; original_reason={reason}",
+        )
+
+    if base_price < config.MIN_REC_PRICE_USD2:
+        new_reason = (
+            "base_price_below_secondary_minimum "
+            f"({base_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
+        )
+        return (
+            True,
+            config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+            f"{new_reason}; original_reason={reason}",
+        )
+
+    return False, days, reason
+
+
+def blacklist_with_html(
+    item_name: str,
+    reason: str,
+    html: str,
+    days: Optional[float] = None,
+    *,
+    rec_price_blacklist: bool = False,
+    base_price: Optional[float] = None,
+) -> Dict[str, str]:
     """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
+
+    if not rec_price_blacklist:
+        redirect, days, reason = _base_price_blacklist_redirect(reason, base_price, days)
+        rec_price_blacklist = redirect or rec_price_blacklist
+
     print(f"[ANALYSIS] {item_name}: {reason}")
-    add_to_blacklist(item_name, reason)
+    add_to_blacklist(item_name, reason, days=days, rec_price=rec_price_blacklist)
     html_path = os.path.join(
         config.HTML_BLACKLIST_DIR,
         f"{safe_filename(item_name)}.html",
@@ -239,8 +356,8 @@ def blacklist_with_html(item_name: str, reason: str, html: str) -> Dict[str, str
     }
 
 
-def get_blacklist_entry(item_name: str) -> Optional[sqlite3.Row]:
-    conn = get_blacklist_conn()
+def get_blacklist_entry(item_name: str, *, rec_price: bool = False) -> Optional[sqlite3.Row]:
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM blacklist WHERE item_name = ?",
@@ -251,12 +368,40 @@ def get_blacklist_entry(item_name: str) -> Optional[sqlite3.Row]:
     return row
 
 
-def remove_from_blacklist(item_name: str) -> None:
-    conn = get_blacklist_conn()
+def remove_from_blacklist(item_name: str, *, rec_price: bool = False) -> None:
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute("DELETE FROM blacklist WHERE item_name = ?", (item_name,))
     conn.commit()
     conn.close()
+
+
+def get_active_blacklist_entry(item_name: str) -> Optional[Dict[str, object]]:
+    sources = (
+        (False, "general_blacklist"),
+        (True, "rec_price_blacklist"),
+    )
+    now = datetime.utcnow()
+    for rec_price_flag, source_name in sources:
+        entry = get_blacklist_entry(item_name, rec_price=rec_price_flag)
+        if entry is None:
+            continue
+
+        try:
+            expires_at_str = entry["expires_at"]
+        except Exception:
+            expires_at_str = None
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str) if expires_at_str else None
+        except Exception:
+            expires_at = None
+
+        if expires_at is not None and expires_at > now:
+            return {"entry": entry, "source": source_name, "rec_price": rec_price_flag}
+
+        remove_from_blacklist(item_name, rec_price=rec_price_flag)
+
+    return None
 
 
 # ---------- Weighted statistics ----------
@@ -370,8 +515,40 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         }
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
-    prices = [s.price for s in sales_sorted]
+    prices_raw = [s.price for s in sales_sorted]
     weights = [s.amount for s in sales_sorted]
+
+    def _price_corridor(values: List[float], weights_values: List[float]) -> Tuple[float, float]:
+        method = str(getattr(config, "PRICE_OUTLIER_METHOD", "quantile")).lower()
+        if method == "iqr":
+            q1 = weighted_quantile(values, weights_values, 0.25)
+            q3 = weighted_quantile(values, weights_values, 0.75)
+            iqr = q3 - q1
+            mult = float(getattr(config, "PRICE_OUTLIER_IQR_MULT", 1.5))
+            low = q1 - mult * iqr
+            high = q3 + mult * iqr
+        else:
+            low_q, high_q = getattr(config, "PRICE_OUTLIER_QUANTILES", (0.05, 0.95))
+            low_q = max(0.0, min(1.0, float(low_q)))
+            high_q = max(0.0, min(1.0, float(high_q)))
+            if low_q > high_q:
+                low_q, high_q = high_q, low_q
+            low = weighted_quantile(values, weights_values, low_q)
+            high = weighted_quantile(values, weights_values, high_q)
+
+        if low > high:
+            low, high = high, low
+        return low, high
+
+    low_corridor, high_corridor = _price_corridor(prices_raw, weights)
+    prices = [
+        max(low_corridor, min(price, high_corridor))
+        for price in prices_raw
+    ]
+
+    sales_clean = [
+        Sale(dt=s.dt, price=p, amount=s.amount) for s, p in zip(sales_sorted, prices)
+    ]
 
     base_price = weighted_quantile(prices, weights, 0.5)
     mean_price = weighted_mean(prices, weights)
@@ -385,7 +562,7 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
     p80 = weighted_quantile(prices, weights, 0.80)
 
     first_dt = sales_sorted[0].dt
-    t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_sorted]
+    t_vals = [(s.dt - first_dt).total_seconds() / 86400.0 for s in sales_clean]
 
     slope_volume, intercept_volume = _linear_regression_params(
         t_vals, prices, weights
@@ -405,11 +582,11 @@ def compute_basic_metrics(sales: List[Sale]) -> Dict[str, float]:
         if window_days <= 0:
             return 0.0, 0.0
 
-        last_dt = sales_sorted[-1].dt
+        last_dt = sales_clean[-1].dt
         cutoff = last_dt - timedelta(days=window_days)
-        window_sales = [s for s in sales_sorted if s.dt >= cutoff]
+        window_sales = [s for s in sales_clean if s.dt >= cutoff]
         if len(window_sales) < 2:
-            window_sales = sales_sorted
+            window_sales = sales_clean
 
         first_dt_local = window_sales[0].dt
         t_vals_local = [
@@ -919,10 +1096,12 @@ def find_valid_dip_segments(sales: List[Sale], metrics: Dict[str, float]) -> Lis
 
 # ---------- Рекомендованная цена ----------
 
-def compute_rec_price_default(sales: List[Sale], q: float) -> Tuple[float, List[Sale]]:
+def compute_rec_price_default(
+    sales: List[Sale], q: float, recent_days: Optional[float] = None
+) -> Tuple[float, List[Sale]]:
     """
     Базовая рек. цена:
-      - последние RECENT_DAYS_FOR_REC_PRICE дней,
+      - последние recent_days (или RECENT_DAYS_FOR_REC_PRICE по умолчанию) дней,
       - взвешенный квантиль q (зависит от стабильности предмета).
     """
     if not sales:
@@ -930,7 +1109,8 @@ def compute_rec_price_default(sales: List[Sale], q: float) -> Tuple[float, List[
 
     sales_sorted = sorted(sales, key=lambda s: s.dt)
     last_dt = sales_sorted[-1].dt
-    cutoff = last_dt - timedelta(days=config.RECENT_DAYS_FOR_REC_PRICE)
+    days = recent_days if recent_days is not None else config.RECENT_DAYS_FOR_REC_PRICE
+    cutoff = last_dt - timedelta(days=days)
 
     recent = [s for s in sales_sorted if s.dt >= cutoff]
     if len(recent) < 10:
@@ -951,10 +1131,16 @@ def compute_stable_like_rec_price(
     тренда (может быть <1 при нисходящем тренде).
     """
 
-    base_price, base_sales = compute_rec_price_default(
-        sales, config.REC_PRICE_LOWER_Q_STABLE
-    )
     trend = metrics.get("trend_rel_30", 0.0)
+    recent_days = (
+        config.RECENT_DAYS_FOR_UPTREND_REC_PRICE
+        if trend > config.TREND_REL_FLAT_MAX
+        else None
+    )
+
+    base_price, base_sales = compute_rec_price_default(
+        sales, config.REC_PRICE_LOWER_Q_STABLE, recent_days
+    )
     forecast_trend = metrics.get("trend_rel_30_down_forecast", trend)
     trend_factor = 1.0
 
@@ -1375,6 +1561,13 @@ def classify_shape_basic(
             "reason": f"strong_downtrend ({trend*100:.1f}%)",
         }
 
+    # 2a) Сильный восходящий тренд – блэклист (если это не буст)
+    if trend > config.MAX_UP_TREND_REL:
+        return {
+            "status": "blacklist",
+            "reason": f"strong_uptrend ({trend*100:.1f}%)",
+        }
+
     # shape_ok = спокойный график по разбросу
     shape_ok = (cv <= config.STABLE_MAX_CV and wave_amp <= config.STABLE_MAX_WAVE_AMP)
 
@@ -1396,7 +1589,9 @@ def classify_shape_basic(
     # 4) stable_up (tier 2): тренд вверх, не слишком резкий, форма спокойная
     if trend > config.TREND_REL_FLAT_MAX and trend <= config.MAX_UP_TREND_REL and shape_ok:
         rec_price, rec_price_sales = compute_rec_price_default(
-            sales, config.REC_PRICE_LOWER_Q_STABLE
+            sales,
+            config.REC_PRICE_LOWER_Q_STABLE,
+            config.RECENT_DAYS_FOR_UPTREND_REC_PRICE,
         )
         return _ok_result(
             graph_type="stable_up",
@@ -1472,8 +1667,13 @@ def classify_shape_basic(
         )
 
     # 7) всё остальное – нестабильные / сложные графики (tier 4)
+    recent_days = (
+        config.RECENT_DAYS_FOR_UPTREND_REC_PRICE
+        if trend > config.TREND_REL_FLAT_MAX
+        else None
+    )
     rec_price, rec_price_sales = compute_rec_price_default(
-        sales, config.REC_PRICE_LOWER_Q_VOLATILE
+        sales, config.REC_PRICE_LOWER_Q_VOLATILE, recent_days
     )
     graph_type = "volatile"
     trend_factor = 1.0
@@ -1703,12 +1903,31 @@ def build_three_day_ranges(sales: List[Sale]) -> List[Tuple[datetime, datetime]]
 # (эта часть не менялась, оставляю как в предыдущей версии)
 
 def get_all_proxies() -> List[sqlite3.Row]:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM proxies WHERE disabled = 0 ORDER BY id ASC")
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_last_proxy_position() -> int:
+    conn = get_proxy_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT last_position FROM proxy_state WHERE id = 1")
+    row = cur.fetchone()
+    conn.close()
+    if row is None or row["last_position"] is None:
+        return -1
+    return int(row["last_position"])
+
+
+def set_last_proxy_position(position: int) -> None:
+    conn = get_proxy_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE proxy_state SET last_position = ? WHERE id = 1", (position,))
+    conn.commit()
+    conn.close()
 
 
 def update_proxy_row(
@@ -1720,7 +1939,7 @@ def update_proxy_row(
     fallback_fail_count: Optional[int] = None,
     disabled: Optional[int] = None,
 ) -> None:
-    conn = get_conn()
+    conn = get_proxy_conn()
     cur = conn.cursor()
 
     sets = []
@@ -1766,6 +1985,34 @@ def build_requests_proxy(address: str) -> Dict[str, str]:
     }
 
 
+def direct_is_resting(now_ts: Optional[float] = None) -> bool:
+    if now_ts is None:
+        now_ts = time.time()
+    return direct_ip_state["rest_until_ts"] > now_ts
+
+
+def send_direct_to_rest(now_ts: Optional[float] = None) -> None:
+    """Отправляет прямой IP на отдых по той же схеме, что и прокси."""
+    if now_ts is None:
+        now_ts = time.time()
+
+    if direct_ip_state["fail_stage"] == 0:
+        rest_until = now_ts + config.REST_PROXY1
+        stage = 1
+        print(
+            f"[PROXY] Отправляем прямой IP на первый отдых на {config.REST_PROXY1} сек."
+        )
+    else:
+        rest_until = now_ts + config.REST_PROXY2
+        stage = 2
+        print(
+            f"[PROXY] Отправляем прямой IP на второй отдых на {config.REST_PROXY2} сек."
+        )
+
+    direct_ip_state["rest_until_ts"] = rest_until
+    direct_ip_state["fail_stage"] = stage
+
+
 def fetch_html_direct(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1783,9 +2030,18 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     """
     ensure_directories()
 
+    last_error_html: Optional[str] = None
+
     if config.PROXY_SELECT == 0:
         attempt = 0
         while attempt < config.MAX_HTML_RETRIES:
+            now_ts = time.time()
+            if direct_is_resting(now_ts):
+                remain = int(direct_ip_state["rest_until_ts"] - now_ts)
+                print(f"[PROXY] Прямой IP ещё отдыхает {remain} сек.")
+                time.sleep(max(1, min(remain, config.DELAY_DOWNLOAD_ERROR)))
+                continue
+
             attempt += 1
             try:
                 html = fetch_html_direct(url)
@@ -1796,6 +2052,14 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 with open(temp_path, "w", encoding="utf-8") as f:
                     f.write(html)
                 return html
+            except requests.HTTPError as e:
+                resp = e.response
+                if resp is not None and resp.status_code == 429:
+                    last_error_html = resp.text
+                    send_direct_to_rest(now_ts)
+                    continue
+                print(f"[DOWNLOAD] Ошибка прямого скачивания (попытка {attempt}): {e}")
+                time.sleep(config.DELAY_DOWNLOAD_ERROR)
             except requests.RequestException as e:
                 print(f"[DOWNLOAD] Ошибка прямого скачивания (попытка {attempt}): {e}")
                 time.sleep(config.DELAY_DOWNLOAD_ERROR)
@@ -1812,8 +2076,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             "id": None,
             "address": "DIRECT",
             "last_used_ts": 0.0,
-            "rest_until_ts": 0.0,
-            "fail_stage": 0,
+            "rest_until_ts": direct_ip_state["rest_until_ts"],
+            "fail_stage": direct_ip_state["fail_stage"],
             "fallback_fail_count": 0,
             "disabled": 0,
         }
@@ -1826,7 +2090,10 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     if cycle_len == 0:
         return fetch_html_direct(url)
 
-    start_index = 0
+    last_position = get_last_proxy_position()
+    if last_position < -1:
+        last_position = -1
+    start_index = (last_position + 1) % cycle_len
     attempt = 0
     last_error_html: Optional[str] = None
 
@@ -1841,9 +2108,9 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             if row["address"] == "DIRECT":
                 use_direct = True
                 proxy_id = None
-                rest_until_ts = 0.0
+                rest_until_ts = direct_ip_state["rest_until_ts"]
                 last_used_ts = 0.0
-                fail_stage = 0
+                fail_stage = direct_ip_state["fail_stage"]
                 fallback_fail_count = 0
             else:
                 use_direct = False
@@ -1855,9 +2122,10 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
             now_ts = time.time()
 
-            if not use_direct and rest_until_ts > now_ts:
+            if rest_until_ts > now_ts:
                 remain = int(rest_until_ts - now_ts)
-                print(f"[PROXY] Прокси {row['address']} ещё отдыхает {remain} сек.")
+                label = "прямой IP" if use_direct else f"прокси {row['address']}"
+                print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
                 continue
 
             if not config.DELAY_OFF and not use_direct and last_used_ts > 0:
@@ -1894,7 +2162,9 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     last_error_html = text
                     print(f"[PROXY] 429 Too Many Requests от {row['address'] if not use_direct else 'DIRECT'}.")
 
-                    if not use_direct and proxy_id is not None:
+                    if use_direct:
+                        send_direct_to_rest()
+                    elif proxy_id is not None:
                         now_ts = time.time()
                         if fail_stage == 0:
                             rest_until = now_ts + config.REST_PROXY1
@@ -1933,6 +2203,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 with open(temp_path, "w", encoding="utf-8") as f:
                     f.write(html)
 
+                set_last_proxy_position(idx)
                 return html
 
             except requests.RequestException as e:
@@ -1942,6 +2213,12 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 )
                 if not use_direct and proxy_id is not None:
                     try:
+                        if direct_is_resting():
+                            remain = int(direct_ip_state["rest_until_ts"] - time.time())
+                            print(
+                                f"[DOWNLOAD] Прямой IP отдыхает, ждём {remain} сек и пробуем другие прокси."
+                            )
+                            continue
                         print("[DOWNLOAD] Пытаемся скачать через прямой IP после ошибки прокси...")
                         html = fetch_html_direct(url)
                         now_ts = time.time()
@@ -1973,7 +2250,38 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                         with open(temp_path, "w", encoding="utf-8") as f:
                             f.write(html)
 
+                        set_last_proxy_position(idx)
                         return html
+                    except requests.HTTPError as e2:
+                        resp = e2.response
+                        if resp is not None and resp.status_code == 429:
+                            print(
+                                "[DOWNLOAD] Прямой IP вернул 429 при проверке соединения; "
+                                "считаем, что соединение есть."
+                            )
+                            send_direct_to_rest()
+                            now_ts = time.time()
+                            rest_until = now_ts + config.REST_PROXY1
+                            fallback_fail_count += 1
+                            disabled_flag = 0
+                            if fallback_fail_count >= config.MAX_FALLBACK_FAILS:
+                                disabled_flag = 1
+                                print(
+                                    f"[PROXY] Прокси {row['address']} "
+                                    f"навсегда отключен (слишком много сбоев)."
+                                )
+                            update_proxy_row(
+                                proxy_id,
+                                rest_until_ts=rest_until,
+                                fallback_fail_count=fallback_fail_count,
+                                disabled=disabled_flag,
+                            )
+                            continue
+                        print(
+                            f"[DOWNLOAD] Не удалось скачать через прямой IP после ошибки прокси: {e2}"
+                        )
+                        time.sleep(config.DELAY_DOWNLOAD_ERROR)
+                        continue
                     except requests.RequestException as e2:
                         print(
                             f"[DOWNLOAD] Не удалось скачать через прямой IP после ошибки прокси: {e2}"
@@ -2084,25 +2392,20 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
                 }
 
     # --- Проверяем блэклист ---
-    bl = get_blacklist_entry(item_name)
-    if bl is not None:
-        expires_at_str = bl["expires_at"]
-        try:
-            expires_at = datetime.fromisoformat(expires_at_str)
-        except Exception:
-            expires_at = None
-
-        if expires_at is not None and expires_at > datetime.utcnow():
-            reason = bl["reason"]
-            print(f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. reason={reason}")
-            return {
-                "status": "blacklist",
-                "item_name": item_name,
-                "reason": reason,
-            }
-        else:
-            print(f"[BLACKLIST] {item_name}: срок блэклиста истёк, удаляем.")
-            remove_from_blacklist(item_name)
+    bl_info = get_active_blacklist_entry(item_name)
+    if bl_info is not None:
+        entry = bl_info["entry"]
+        expires_at_str = entry.get("expires_at") if isinstance(entry, dict) else entry["expires_at"]
+        reason = entry.get("reason") if isinstance(entry, dict) else entry["reason"]
+        print(
+            f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. "
+            f"reason={reason} (source={bl_info['source']})"
+        )
+        return {
+            "status": "blacklist",
+            "item_name": item_name,
+            "reason": reason,
+        }
 
     # --- Скачиваем HTML ---
     try:
@@ -2153,10 +2456,14 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             "message": msg,
         }
 
+    metrics = compute_basic_metrics(sales)
+
     total_amount_30d = sum(s.amount for s in sales)
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
-        return blacklist_with_html(item_name, reason, html)
+        return blacklist_with_html(
+            item_name, reason, html, base_price=metrics.get("base_price")
+        )
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
     # чтобы предмет моментально отправлялся в блэклист без дальнейшего анализа.
@@ -2172,9 +2479,9 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
             f">= {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h within "
             f"{config.GAP_FILTER_WINDOW_DAYS}d; max_gap={max_gap_hours:.1f}h)"
         )
-        return blacklist_with_html(item_name, reason, html)
-
-    metrics = compute_basic_metrics(sales)
+        return blacklist_with_html(
+            item_name, reason, html, base_price=metrics.get("base_price")
+        )
     dips = compute_price_dips(sales, metrics)
 
     print(
@@ -2197,21 +2504,12 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     if shape_result["status"] == "blacklist":
         reason = shape_result["reason"]
         print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
-        add_to_blacklist(item_name, reason)
-        html_path = os.path.join(
-            config.HTML_BLACKLIST_DIR,
-            f"{safe_filename(item_name)}.html",
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            base_price=metrics.get("base_price"),
         )
-        try:
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(html)
-        except Exception:
-            pass
-        return {
-            "status": "blacklist",
-            "item_name": item_name,
-            "reason": reason,
-        }
 
     rec_price = float(shape_result["rec_price"])
     rec_price_sales = shape_result.get("rec_price_sales", [])
@@ -2244,6 +2542,32 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     tier = int(shape_result["tier"])
     graph_type = shape_result["graph_type"]
     reason = shape_result["reason"]
+
+    if rec_price < config.MIN_REC_PRICE_USD1:
+        reason = (
+            "rec_price_below_minimum "
+            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
+        )
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+            rec_price_blacklist=True,
+        )
+
+    if rec_price < config.MIN_REC_PRICE_USD2:
+        reason = (
+            "rec_price_below_secondary_minimum "
+            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
+        )
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+            rec_price_blacklist=True,
+        )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
 

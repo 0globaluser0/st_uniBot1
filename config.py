@@ -3,8 +3,13 @@
 # ------------ General paths ------------
 DB_PATH = "steam_analyser.db"
 
+# Отдельная база для прокси
+PROXY_DB_PATH = "steam_analyser_proxies.db"
+
 # Отдельная база для блэклиста
 BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
+# Отдельная база для блэклиста по рек. цене
+REC_PRICE_BLACKLIST_DB_PATH = "steam_analyser_rec_price_blacklist.db"
 
 PROXIES_FILE = "proxies.txt"
 
@@ -13,6 +18,27 @@ HTML_BLACKLIST_DIR = "HTML_steam_blacklist"
 HTML_FAILED_DIR = "HTML_steam_failed"
 SELL_PARSING_DIR = "sell_parsing"
 HTML_TEMP_DIR = "HTML_temp"
+
+# ------------ Liss bot settings ------------
+
+# Список ключевых слов, при наличии которых предмет отбрасывается
+LISS_BLACKLIST_KEYWORDS = []
+
+# Основной и дополнительный фильтры по цене лота, USD
+LISS_MIN_PRICE = 0.0
+LISS_EXTRA_MIN_PRICE = 0.0
+LISS_MAX_PRICE = 1000.0
+
+# Минимально допустимая прибыль лота (((rec_price * 0.8697) / price) - 1)
+LISS_MIN_PROFIT = 0.0
+
+# Максимальный срок холда предмета (0–8 дней)
+LISS_MAX_HOLD_DAYS = 0
+
+# Ограничения по количеству и сумме покупок
+LISS_QUANTITY_PERCENT = 10.0  # доля от средних продаж в неделю на Steam
+LISS_PERIOD_DAYS = 3  # период учёта для лимитов
+LISS_SUM_LIMIT = 50.0  # максимальная сумма покупок одного предмета за период
 
 # ------------ Caching / DB freshness ------------
 
@@ -58,6 +84,13 @@ HTTP_TIMEOUT = 20.0
 
 # Минимальное количество проданных штук за 30 дней, чтобы вообще анализировать предмет
 MIN_TOTAL_AMOUNT_30D = 150
+
+# Фильтр выбросов цен для расчёта базовых метрик и трендов.
+# Метод "quantile" использует коридор между PRICE_OUTLIER_QUANTILES (винсоризация),
+# метод "iqr" строит коридор [Q1 - k*IQR, Q3 + k*IQR] с множителем PRICE_OUTLIER_IQR_MULT.
+PRICE_OUTLIER_METHOD = "quantile"  # "quantile" или "iqr"
+PRICE_OUTLIER_QUANTILES = (0.05, 0.95)
+PRICE_OUTLIER_IQR_MULT = 1.5
 
 # ------------ Разрывы между точками графика ------------
 
@@ -117,11 +150,25 @@ MAX_DOWN_TREND_REL = -0.35  # -40% за месяц
 
 # Сколько последних дней учитывать при расчёте рек. цены
 RECENT_DAYS_FOR_REC_PRICE = 14
+# Сколько последних дней учитывать для расчёта рек. цены на восходящих трендах
+RECENT_DAYS_FOR_UPTREND_REC_PRICE = 14
 
 # Раздельные квантили для стабильных и волатильных предметов
 # 0.40 → 40-й перцентиль (60% объёма продаж выше этой цены)
 REC_PRICE_LOWER_Q_STABLE = 0.4
 REC_PRICE_LOWER_Q_VOLATILE = 0.35
+
+# Минимально допустимая рекомендованная цена, USD (нижний порог)
+MIN_REC_PRICE_USD1 = 0.1
+
+# Сколько дней предмет находится в блэклисте, если rec_price ниже допустимого минимума (нижний порог)
+MIN_REC_PRICE_BLACKLIST_DAYS1 = 90.0
+
+# Минимально допустимая рекомендованная цена, USD (верхний порог)
+MIN_REC_PRICE_USD2 = 0.2
+
+# Сколько дней предмет находится в блэклисте, если rec_price ниже допустимого минимума (верхний порог)
+MIN_REC_PRICE_BLACKLIST_DAYS2 = 30.0
 
 # Проверка достаточной поддержки продаж около рек. цены
 # На нескольких временных промежутках проверяется, что вокруг rec_price есть
