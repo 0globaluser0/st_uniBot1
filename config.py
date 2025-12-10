@@ -8,6 +8,8 @@ PROXY_DB_PATH = "steam_analyser_proxies.db"
 
 # Отдельная база для блэклиста
 BLACKLIST_DB_PATH = "steam_analyser_blacklist.db"
+# Отдельная база для блэклиста по рек. цене
+REC_PRICE_BLACKLIST_DB_PATH = "steam_analyser_rec_price_blacklist.db"
 
 PROXIES_FILE = "proxies.txt"
 
@@ -156,11 +158,17 @@ RECENT_DAYS_FOR_UPTREND_REC_PRICE = 14
 REC_PRICE_LOWER_Q_STABLE = 0.4
 REC_PRICE_LOWER_Q_VOLATILE = 0.35
 
-# Минимально допустимая рекомендованная цена, USD
-MIN_REC_PRICE_USD = 0.05
+# Минимально допустимая рекомендованная цена, USD (нижний порог)
+MIN_REC_PRICE_USD1 = 0.1
 
-# Сколько дней предмет находится в блэклисте, если rec_price ниже допустимого минимума
-MIN_REC_PRICE_BLACKLIST_DAYS = 3.0
+# Сколько дней предмет находится в блэклисте, если rec_price ниже допустимого минимума (нижний порог)
+MIN_REC_PRICE_BLACKLIST_DAYS1 = 90.0
+
+# Минимально допустимая рекомендованная цена, USD (верхний порог)
+MIN_REC_PRICE_USD2 = 0.2
+
+# Сколько дней предмет находится в блэклисте, если rec_price ниже допустимого минимума (верхний порог)
+MIN_REC_PRICE_BLACKLIST_DAYS2 = 30.0
 
 # Проверка достаточной поддержки продаж около рек. цены
 # На нескольких временных промежутках проверяется, что вокруг rec_price есть

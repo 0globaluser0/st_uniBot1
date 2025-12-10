@@ -68,6 +68,12 @@ def get_blacklist_conn() -> sqlite3.Connection:
     return conn
 
 
+def get_rec_price_blacklist_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(config.REC_PRICE_BLACKLIST_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def init_db() -> None:
     ensure_directories()
     conn = get_conn()
@@ -151,6 +157,22 @@ def init_db() -> None:
     )
     bl_conn.commit()
     bl_conn.close()
+
+    # Таблица блэклиста по рек. цене в отдельной базе
+    rec_bl_conn = get_rec_price_blacklist_conn()
+    rec_bl_cur = rec_bl_conn.cursor()
+    rec_bl_cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blacklist (
+            item_name  TEXT PRIMARY KEY,
+            added_at   TEXT,
+            expires_at TEXT,
+            reason     TEXT
+        )
+        """
+    )
+    rec_bl_conn.commit()
+    rec_bl_conn.close()
 
 
 def upsert_proxy(address: str) -> None:
@@ -240,11 +262,17 @@ def save_item_result(
     conn.close()
 
 
-def add_to_blacklist(item_name: str, reason: str, days: Optional[float] = None) -> None:
+def _select_blacklist_conn(rec_price: bool) -> sqlite3.Connection:
+    return get_rec_price_blacklist_conn() if rec_price else get_blacklist_conn()
+
+
+def add_to_blacklist(
+    item_name: str, reason: str, days: Optional[float] = None, *, rec_price: bool = False
+) -> None:
     now = datetime.utcnow()
     duration_days = config.BLACKLIST_DAYS if days is None else days
     expires = now + timedelta(days=duration_days)
-    conn = get_blacklist_conn()
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute(
         """
@@ -262,11 +290,16 @@ def add_to_blacklist(item_name: str, reason: str, days: Optional[float] = None) 
 
 
 def blacklist_with_html(
-    item_name: str, reason: str, html: str, days: Optional[float] = None
+    item_name: str,
+    reason: str,
+    html: str,
+    days: Optional[float] = None,
+    *,
+    rec_price_blacklist: bool = False,
 ) -> Dict[str, str]:
     """Добавляет предмет в блэклист и сохраняет его HTML в соответствующую папку."""
     print(f"[ANALYSIS] {item_name}: {reason}")
-    add_to_blacklist(item_name, reason, days=days)
+    add_to_blacklist(item_name, reason, days=days, rec_price=rec_price_blacklist)
     html_path = os.path.join(
         config.HTML_BLACKLIST_DIR,
         f"{safe_filename(item_name)}.html",
@@ -284,8 +317,8 @@ def blacklist_with_html(
     }
 
 
-def get_blacklist_entry(item_name: str) -> Optional[sqlite3.Row]:
-    conn = get_blacklist_conn()
+def get_blacklist_entry(item_name: str, *, rec_price: bool = False) -> Optional[sqlite3.Row]:
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM blacklist WHERE item_name = ?",
@@ -296,12 +329,40 @@ def get_blacklist_entry(item_name: str) -> Optional[sqlite3.Row]:
     return row
 
 
-def remove_from_blacklist(item_name: str) -> None:
-    conn = get_blacklist_conn()
+def remove_from_blacklist(item_name: str, *, rec_price: bool = False) -> None:
+    conn = _select_blacklist_conn(rec_price)
     cur = conn.cursor()
     cur.execute("DELETE FROM blacklist WHERE item_name = ?", (item_name,))
     conn.commit()
     conn.close()
+
+
+def get_active_blacklist_entry(item_name: str) -> Optional[Dict[str, object]]:
+    sources = (
+        (False, "general_blacklist"),
+        (True, "rec_price_blacklist"),
+    )
+    now = datetime.utcnow()
+    for rec_price_flag, source_name in sources:
+        entry = get_blacklist_entry(item_name, rec_price=rec_price_flag)
+        if entry is None:
+            continue
+
+        try:
+            expires_at_str = entry["expires_at"]
+        except Exception:
+            expires_at_str = None
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str) if expires_at_str else None
+        except Exception:
+            expires_at = None
+
+        if expires_at is not None and expires_at > now:
+            return {"entry": entry, "source": source_name, "rec_price": rec_price_flag}
+
+        remove_from_blacklist(item_name, rec_price=rec_price_flag)
+
+    return None
 
 
 # ---------- Weighted statistics ----------
@@ -2258,25 +2319,20 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
                 }
 
     # --- Проверяем блэклист ---
-    bl = get_blacklist_entry(item_name)
-    if bl is not None:
-        expires_at_str = bl["expires_at"]
-        try:
-            expires_at = datetime.fromisoformat(expires_at_str)
-        except Exception:
-            expires_at = None
-
-        if expires_at is not None and expires_at > datetime.utcnow():
-            reason = bl["reason"]
-            print(f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. reason={reason}")
-            return {
-                "status": "blacklist",
-                "item_name": item_name,
-                "reason": reason,
-            }
-        else:
-            print(f"[BLACKLIST] {item_name}: срок блэклиста истёк, удаляем.")
-            remove_from_blacklist(item_name)
+    bl_info = get_active_blacklist_entry(item_name)
+    if bl_info is not None:
+        entry = bl_info["entry"]
+        expires_at_str = entry.get("expires_at") if isinstance(entry, dict) else entry["expires_at"]
+        reason = entry.get("reason") if isinstance(entry, dict) else entry["reason"]
+        print(
+            f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. "
+            f"reason={reason} (source={bl_info['source']})"
+        )
+        return {
+            "status": "blacklist",
+            "item_name": item_name,
+            "reason": reason,
+        }
 
     # --- Скачиваем HTML ---
     try:
@@ -2419,16 +2475,30 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     graph_type = shape_result["graph_type"]
     reason = shape_result["reason"]
 
-    if rec_price < config.MIN_REC_PRICE_USD:
+    if rec_price < config.MIN_REC_PRICE_USD1:
         reason = (
             "rec_price_below_minimum "
-            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD:.4f})"
+            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
         )
         return blacklist_with_html(
             item_name,
             reason,
             html,
-            days=config.MIN_REC_PRICE_BLACKLIST_DAYS,
+            days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+            rec_price_blacklist=True,
+        )
+
+    if rec_price < config.MIN_REC_PRICE_USD2:
+        reason = (
+            "rec_price_below_secondary_minimum "
+            f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
+        )
+        return blacklist_with_html(
+            item_name,
+            reason,
+            html,
+            days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+            rec_price_blacklist=True,
         )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
