@@ -162,12 +162,12 @@ def evaluate_known_items(market_items: List[Dict[str, object]], known_items: Lis
             continue
 
         rec_price = float(known["rec_price"])
-        denom = rec_price * 0.8697 - 1
+        denom = rec_price * 0.8697
         if denom <= 0:
             continue
 
         price = float(market_item["price"])
-        profit = price / denom
+        profit = price / denom - 1
         if profit > config.LISS_MIN_PROFIT:
             print(f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve")
             print("[LISS] предчек: предмет прошел фильтры и готов к парсингу id")
@@ -242,12 +242,12 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
             print(f"[LISS][INFO] {name}: достигнут лимит покупок")
             continue
 
-        denom = rec_price * 0.8697 - 1
+        denom = rec_price * 0.8697
         if denom <= 0:
             print(f"[LISS][WARN] {name}: некорректная рек. цена ({rec_price})")
             continue
 
-        profit = price / denom
+        profit = price / denom - 1
         if profit > config.LISS_MIN_PROFIT:
             print(
                 f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve"
