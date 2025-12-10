@@ -23,6 +23,13 @@ direct_ip_state = {
 }
 
 
+def log_rec_detail(message: str) -> None:
+    """Выводит подробные логи расчёта рек. цены при включённом флаге."""
+
+    if config.REC_PRICE_LOG_DETAILS:
+        print(message)
+
+
 @dataclass
 class Sale:
     dt: datetime
@@ -1315,20 +1322,21 @@ def enforce_rec_price_sales_support(
             t += step_window
 
         if period_violations:
-            print(
+            log_rec_detail(
                 "[REC_SUPPORT] Нарушения поддержки продаж: период последних "
                 f"{period_cfg['HOURS']}ч, rec_price={period_rec_price:.2f}, "
                 f"step={period_cfg['STEP_WINDOW_HOURS']}ч"
             )
-            for v in period_violations:
-                print(
-                    "    окно "
-                    f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
-                    f"candidate_price={v['candidate_price']:.2f}, "
-                    f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
-                    f"(объём>=rec_price: {v['support_vol']:.2f}) "
-                    f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
-                )
+            if config.REC_PRICE_LOG_DETAILS:
+                for v in period_violations:
+                    print(
+                        "    окно "
+                        f"{v['start'].isoformat()} – {v['end'].isoformat()}: "
+                        f"candidate_price={v['candidate_price']:.2f}, "
+                        f"объём={v['total_vol']}, нужно>= {v['required_vol']:.2f} "
+                        f"(объём>=rec_price: {v['support_vol']:.2f}) "
+                        f"(min_share={v['min_share']:.2f}, rec_price={v['rec_price']:.2f})"
+                    )
 
         if len(violating_candidates) > allowed_violations:
             violating_candidates.sort()
@@ -1514,7 +1522,7 @@ def classify_shape_basic(
         post_trend_factor = 1.0 if use_dip_price else stable_trend_factor
         final_rec_price = chosen_supported_price * post_trend_factor
 
-        print(
+        log_rec_detail(
             f"[REC_PRICE] old_dip_dips: dip_supported={dip_supported_price:.4f}, "
             f"stable_supported={stable_supported_price:.4f}, "
             f"chosen={'dip' if use_dip_price else 'stable'}, "
@@ -1645,7 +1653,7 @@ def classify_shape_basic(
         chosen_sales = rec_price_sales if use_dip_price else stable_sales
         post_trend_factor = 1.0 if use_dip_price else stable_trend_factor
 
-        print(
+        log_rec_detail(
             f"[REC_PRICE] wave: dip_based={dip_final_price:.4f}, "
             f"stable_like={stable_final_price:.4f}, chosen={'dip' if use_dip_price else 'stable'}"
         )
@@ -2450,7 +2458,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         )
     dips = compute_price_dips(sales, metrics)
 
-    print(
+    log_rec_detail(
         f"[ANALYSIS] {item_name}: base={metrics['base_price']:.4f}, "
         f"mean={metrics['mean_price']:.4f}, std={metrics['std_price']:.4f}, "
         f"cv={metrics['cv_price']:.3f}, \n"
@@ -2492,7 +2500,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         periods_override=periods_override,
     )
     if adjusted_rec_price != rec_price:
-        print(
+        log_rec_detail(
             f"[ADJUST] rec_price lowered from {rec_price:.4f} to {adjusted_rec_price:.4f} "
             "to satisfy sales support."
         )
@@ -2501,7 +2509,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
     trend_factor = shape_result.get("post_support_trend_factor", 1.0)
     if trend_factor != 1.0:
         rec_price *= trend_factor
-        print(
+        log_rec_detail(
             f"[ADJUST] rec_price trend forecast factor applied: x{trend_factor:.3f}; "
             f"new rec_price={rec_price:.4f}"
         )
@@ -2541,7 +2549,7 @@ def parsing_steam_sales(url: str) -> Dict[str, Any]:
         f"[RESULT] OK. {item_name}: type={graph_type}, tier={tier}, "
         f"rec_price={rec_price:.4f} USD, avg_sales={avg_sales:.2f}"
     )
-    print(f"[REASON] {reason}")
+    log_rec_detail(f"[REASON] {reason}")
 
     save_item_result(
         item_name=item_name,

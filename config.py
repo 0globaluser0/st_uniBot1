@@ -19,6 +19,10 @@ HTML_FAILED_DIR = "HTML_steam_failed"
 SELL_PARSING_DIR = "sell_parsing"
 HTML_TEMP_DIR = "HTML_temp"
 
+# 1 = выводить подробные логи расчёта рекомендованной цены
+# 0 = скрыть подробные логи, оставлять только итоговые сообщения
+REC_PRICE_LOG_DETAILS = 0
+
 # ------------ Liss bot settings ------------
 
 # Список ключевых слов, при наличии которых предмет отбрасывается

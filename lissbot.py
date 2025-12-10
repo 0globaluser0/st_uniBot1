@@ -134,11 +134,16 @@ def evaluate_known_items(market_items: List[Dict[str, object]], known_items: Lis
     market_map = {item["name"]: item for item in market_items}
     processed: List[str] = []
 
+    green = "\033[92m"
+    reset = "\033[0m"
+
     for known in known_items:
         name = known["name"]
         market_item = market_map.get(name)
         if not market_item:
             continue
+
+        processed.append(name)
 
         if not within_purchase_limits(
             known["avg_sales"], known["purchased_lots"], known["purchased_sum"]
@@ -156,9 +161,11 @@ def evaluate_known_items(market_items: List[Dict[str, object]], known_items: Lis
 
         profit = adjusted_rec_price / price - 1
         if profit > config.LISS_MIN_PROFIT:
-            print(f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve")
+            print(
+                f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
+                f"{green}approve{reset}"
+            )
             print("[LISS] предчек: предмет прошел фильтры и готов к парсингу id")
-            processed.append(name)
 
     return processed
 
@@ -241,7 +248,8 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
         profit = adjusted_rec_price / price - 1
         if profit > config.LISS_MIN_PROFIT:
             print(
-                f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve"
+                f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
+                "\033[92mapprove\033[0m"
             )
         else:
             print(
