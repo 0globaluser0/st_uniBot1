@@ -28,6 +28,9 @@ REC_PRICE_LOG_DETAILS = 0
 # Список ключевых слов, при наличии которых предмет отбрасывается
 LISS_BLACKLIST_KEYWORDS = ["knife","charm","tag"]
 
+# Периодичность обновления прайс-листа (в минутах)
+PRICE_REFRESH_MINUTES = 10
+
 # Основной и дополнительный фильтры по цене лота, USD
 LISS_MIN_PRICE = 0.18
 LISS_EXTRA_MIN_PRICE = 0.15

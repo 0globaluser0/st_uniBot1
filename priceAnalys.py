@@ -1,5 +1,6 @@
 # priceAnalys.py - core logic: downloading Steam pages, parsing sales, analysing price
 
+import builtins
 import os
 import re
 import json
@@ -14,6 +15,61 @@ from urllib.parse import unquote
 import requests
 
 import config
+
+
+# ---------- Logging helpers ----------
+
+LOG_CONTEXT: Dict[str, Any] = {
+    "proxy_tag": None,
+    "current": None,
+    "total": None,
+}
+
+
+def set_proxy_tag(tag: Optional[str]) -> None:
+    LOG_CONTEXT["proxy_tag"] = tag
+
+
+def set_progress(current: Optional[int], total: Optional[int]) -> None:
+    LOG_CONTEXT["current"] = current
+    LOG_CONTEXT["total"] = total
+
+
+def _build_log_prefix(proxy_tag: Optional[str] = None, counter: Optional[str] = None) -> str:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    parts = [timestamp]
+
+    resolved_proxy_tag = proxy_tag if proxy_tag is not None else LOG_CONTEXT.get("proxy_tag")
+    if resolved_proxy_tag:
+        parts.append(str(resolved_proxy_tag))
+
+    if counter is None:
+        current = LOG_CONTEXT.get("current")
+        total = LOG_CONTEXT.get("total")
+        if current is not None and total is not None:
+            counter = f"{current}/{total}"
+    if counter:
+        parts.append(str(counter))
+
+    return " ".join(parts)
+
+
+def _patched_print(*args: Any, proxy_tag: Optional[str] = None, counter: Optional[str] = None, **kwargs: Any) -> None:
+    original = getattr(builtins, "_original_print", builtins.print)
+    prefix = _build_log_prefix(proxy_tag=proxy_tag, counter=counter)
+
+    if args:
+        new_first = f"{prefix} {args[0]}"
+        args = (new_first, *args[1:])
+    else:
+        args = (prefix,)
+
+    original(*args, **kwargs)
+
+
+if not hasattr(builtins, "_original_print"):
+    builtins._original_print = builtins.print
+    builtins.print = _patched_print
 
 
 # Состояние прямого IP для логики отдыха (как для прокси)
@@ -2017,6 +2073,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     last_error_html: Optional[str] = None
 
     if config.PROXY_SELECT == 0:
+        set_proxy_tag("direct")
         attempt = 0
         while attempt < config.MAX_HTML_RETRIES:
             now_ts = time.time()
@@ -2088,6 +2145,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
         for offset in range(cycle_len):
             idx = (start_index + offset) % cycle_len
             row = proxy_cycle[idx]
+            proxy_tag = f"proxy{idx}" if row["address"] != "DIRECT" else "direct"
+            set_proxy_tag(proxy_tag)
 
             if row["address"] == "DIRECT":
                 use_direct = True
@@ -2392,6 +2451,8 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             "item_name": item_name,
             "message": msg,
         }
+    finally:
+        set_proxy_tag(None)
 
     # --- Парсим продажи ---
     sales: List[Sale] = []
