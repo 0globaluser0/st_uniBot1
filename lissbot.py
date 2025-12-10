@@ -6,7 +6,6 @@
 """
 
 import json
-import sys
 import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
@@ -313,6 +312,33 @@ def process_new_items(
     priceAnalys.set_progress(None, None)
 
 
+def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str) -> None:
+    priceAnalys.set_proxy_tag(None)
+    priceAnalys.set_progress(None, None)
+    print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
+
+    try:
+        market_items = fetch_market_items()
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
+        print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
+        return
+
+    filtered_items = filter_by_keywords_and_price(market_items)
+    known_items = load_known_items()
+    processed_names, passed_filters, profit_passed = evaluate_known_items(
+        filtered_items, known_items
+    )
+    remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
+    print(
+        "[LISS][SUMMARY] Предчек завершён: "
+        f"пройдено предчек {len(processed_names)}, "
+        f"фильтры предчека {passed_filters}, "
+        f"по прибыли {profit_passed}, "
+        f"для новочек осталось {remaining_for_newcheck}"
+    )
+    process_new_items(filtered_items, processed_names)
+
+
 def main() -> None:
     priceAnalys.init_db()
     priceAnalys.load_proxies_from_file()
@@ -322,38 +348,20 @@ def main() -> None:
     reset = "\033[0m"
 
     while True:
-        priceAnalys.set_proxy_tag(None)
-        priceAnalys.set_progress(None, None)
-        print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
-
+        iteration_started_at = time.time()
         try:
-            market_items = fetch_market_items()
-        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
-            print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
-            try:
-                time.sleep(refresh_seconds)
-            except KeyboardInterrupt:
-                print("[LISS] Остановка по запросу пользователя.")
-                sys.exit(0)
-            continue
+            run_refresh_cycle(refresh_seconds, orange, reset)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
+        except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
+            print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
 
-        filtered_items = filter_by_keywords_and_price(market_items)
-        known_items = load_known_items()
-        processed_names, passed_filters, profit_passed = evaluate_known_items(
-            filtered_items, known_items
-        )
-        remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
-        print(
-            "[LISS][SUMMARY] Предчек завершён: "
-            f"пройдено предчек {len(processed_names)}, "
-            f"фильтры предчека {passed_filters}, "
-            f"по прибыли {profit_passed}, "
-            f"для новочек осталось {remaining_for_newcheck}"
-        )
-        process_new_items(filtered_items, processed_names)
-
+        elapsed = time.time() - iteration_started_at
+        sleep_time = max(refresh_seconds - int(elapsed), 0)
         try:
-            time.sleep(refresh_seconds)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
             break
