@@ -347,7 +347,17 @@ def main() -> None:
     orange = "\033[38;5;208m"
     reset = "\033[0m"
 
+    next_cycle_start = time.time()
     while True:
+        now = time.time()
+        sleep_time = next_cycle_start - now
+        try:
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            print("[LISS] Остановка по запросу пользователя.")
+            break
+
         iteration_started_at = time.time()
         try:
             run_refresh_cycle(refresh_seconds, orange, reset)
@@ -357,14 +367,11 @@ def main() -> None:
         except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
             print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
 
-        elapsed = time.time() - iteration_started_at
-        sleep_time = max(refresh_seconds - int(elapsed), 0)
-        try:
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-        except KeyboardInterrupt:
-            print("[LISS] Остановка по запросу пользователя.")
-            break
+        iteration_finished_at = time.time()
+        next_cycle_start += refresh_seconds
+        if iteration_finished_at > next_cycle_start:
+            # Цикл затянулся — стартуем следующий сразу после завершения.
+            next_cycle_start = iteration_finished_at
 
 
 if __name__ == "__main__":
