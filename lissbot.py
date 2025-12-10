@@ -28,7 +28,10 @@ def is_blacklisted(name: str) -> bool:
     if entry is None:
         return False
 
-    expires_at_str = entry.get("expires_at")
+    try:
+        expires_at_str = entry["expires_at"]
+    except (KeyError, IndexError, TypeError):
+        expires_at_str = None
     try:
         expires_at = datetime.fromisoformat(expires_at_str) if expires_at_str else None
     except Exception:
