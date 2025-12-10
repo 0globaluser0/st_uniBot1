@@ -76,6 +76,7 @@ if not hasattr(builtins, "_original_print"):
 direct_ip_state = {
     "rest_until_ts": 0.0,
     "fail_stage": 0,
+    "last_used_ts": 0.0,
 }
 
 
@@ -2061,6 +2062,7 @@ def fetch_html_direct(url: str) -> str:
     }
     resp = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
     resp.raise_for_status()
+    direct_ip_state["last_used_ts"] = time.time()
     return resp.text
 
 
@@ -2082,6 +2084,13 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 print(f"[PROXY] Прямой IP ещё отдыхает {remain} сек.")
                 time.sleep(max(1, min(remain, config.DELAY_DOWNLOAD_ERROR)))
                 continue
+
+            if not config.DELAY_OFF and direct_ip_state["last_used_ts"] > 0:
+                delta = now_ts - direct_ip_state["last_used_ts"]
+                if delta < config.DELAY_HTML:
+                    wait_sec = int(config.DELAY_HTML - delta)
+                    time.sleep(max(wait_sec, 1))
+                    continue
 
             attempt += 1
             try:
@@ -2116,7 +2125,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
         direct_entry = {
             "id": None,
             "address": "DIRECT",
-            "last_used_ts": 0.0,
+            "last_used_ts": direct_ip_state["last_used_ts"],
             "rest_until_ts": direct_ip_state["rest_until_ts"],
             "fail_stage": direct_ip_state["fail_stage"],
             "fallback_fail_count": 0,
@@ -2139,8 +2148,9 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     last_error_html: Optional[str] = None
 
     while attempt < config.MAX_HTML_RETRIES:
-        attempt += 1
- #       print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
+        attempted_request = False
+        min_rest_remain: Optional[int] = None
+#       print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
 
         for offset in range(cycle_len):
             idx = (start_index + offset) % cycle_len
@@ -2152,7 +2162,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 use_direct = True
                 proxy_id = None
                 rest_until_ts = direct_ip_state["rest_until_ts"]
-                last_used_ts = 0.0
+                last_used_ts = direct_ip_state["last_used_ts"]
                 fail_stage = direct_ip_state["fail_stage"]
                 fallback_fail_count = 0
             else:
@@ -2167,19 +2177,20 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
             if rest_until_ts > now_ts:
                 remain = int(rest_until_ts - now_ts)
+                if min_rest_remain is None or remain < min_rest_remain:
+                    min_rest_remain = remain
                 label = "прямой IP" if use_direct else f"прокси {row['address']}"
                # print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
                 continue
 
-            if not config.DELAY_OFF and not use_direct and last_used_ts > 0:
+            if not config.DELAY_OFF and last_used_ts > 0:
                 delta = now_ts - last_used_ts
                 if delta < config.DELAY_HTML:
                     wait_sec = int(config.DELAY_HTML - delta)
-                    #print(
-                    #    f"[PROXY] Высокая нагрузка на прокси {row['address']}, "
-                    #    f"ждём {wait_sec} сек."
-                    #)
                     time.sleep(max(wait_sec, 1))
+                    now_ts = time.time()
+
+            attempted_request = True
 
             try:
                 if use_direct:
@@ -2232,6 +2243,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
                 if not use_direct and proxy_id is not None:
                     update_proxy_row(proxy_id, last_used_ts=time.time())
+                elif use_direct:
+                    direct_ip_state["last_used_ts"] = time.time()
 
                 temp_path = os.path.join(
                     config.HTML_TEMP_DIR,
@@ -2326,6 +2339,17 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     continue
 
         start_index = (start_index + 1) % cycle_len
+
+        if attempted_request:
+            attempt += 1
+        else:
+            sleep_sec = min_rest_remain if min_rest_remain is not None else config.DELAY_DOWNLOAD_ERROR
+            sleep_sec = max(int(sleep_sec), 1)
+            print(
+                f"[PROXY] Все прокси и прямой IP отдыхают, ждём {sleep_sec} сек до следующей попытки."
+            )
+            time.sleep(sleep_sec)
+            continue
 
     if last_error_html:
         temp_path = os.path.join(
