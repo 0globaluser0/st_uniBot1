@@ -9,6 +9,7 @@ import json
 import sys
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
+from urllib.parse import quote
 
 import requests
 
@@ -16,6 +17,13 @@ import config
 import priceAnalys
 
 MARKET_URL = "https://lis-skins.com/market_export_json/csgo.json"
+STEAM_BASE_URL = "https://steamcommunity.com/market/listings/730/"
+
+
+def build_steam_url(name: str) -> str:
+    """Формирует ссылку на страницу предмета в Steam."""
+
+    return f"{STEAM_BASE_URL}{quote(name)}"
 
 
 def is_blacklisted(name: str) -> bool:
@@ -203,11 +211,51 @@ def process_new_items(market_items: List[Dict[str, object]], processed_names: It
         if purchased_sum >= config.LISS_SUM_LIMIT:
             continue
 
-        # На этом шаге должен идти парсинг графика Steam и расчёт прибыли.
-        # Оставляем заглушку, чтобы обозначить прохождение фильтров.
+        steam_url = build_steam_url(name)
         print(
-            f"[LISS] новочек: {name} прошел фильтры и готов к парсингу id (price={price:.2f})"
+            f"[LISS] новочек: {name} прошел фильтры, запускаем парсинг Steam (price={price:.2f})"
         )
+
+        result = priceAnalys.parsing_steam_sales(steam_url)
+        status = result.get("status")
+
+        if status == "invalid_link":
+            print(f"[LISS][WARN] {name}: некорректная ссылка {steam_url}")
+            continue
+        if status == "dota_soon":
+            print(f"[LISS][INFO] {name}: анализ Dota пока не поддерживается")
+            continue
+        if status == "blacklist":
+            print(f"[LISS][INFO] {name}: в блэклисте ({result.get('reason')})")
+            continue
+        if status == "error":
+            print(f"[LISS][ERROR] {name}: {result.get('message')}")
+            continue
+        if status != "ok":
+            print(f"[LISS][WARN] {name}: неизвестный статус {status}, пропускаем")
+            continue
+
+        rec_price = float(result.get("rec_price", 0) or 0)
+        avg_sales = float(result.get("avg_sales", 0) or 0)
+
+        if not within_purchase_limits(avg_sales, purchased_lots, purchased_sum):
+            print(f"[LISS][INFO] {name}: достигнут лимит покупок")
+            continue
+
+        denom = rec_price * 0.8697 - 1
+        if denom <= 0:
+            print(f"[LISS][WARN] {name}: некорректная рек. цена ({rec_price})")
+            continue
+
+        profit = price / denom
+        if profit > config.LISS_MIN_PROFIT:
+            print(
+                f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve"
+            )
+        else:
+            print(
+                f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога"
+            )
 
 
 def main() -> None:
