@@ -1,0 +1,227 @@
+"""Утилита для предварительного анализа лотов lis-skins.
+
+Скрипт скачивает список предметов, применяет набор фильтров и выводит
+сообщения о готовности лотов к дальнейшему анализу (заглушки вместо
+реальных покупок/парсинга Steam).
+"""
+
+import json
+import sys
+from datetime import datetime
+from typing import Dict, Iterable, List, Tuple
+
+import requests
+
+import config
+import priceAnalys
+
+MARKET_URL = "https://lis-skins.com/market_export_json/csgo.json"
+
+
+def is_blacklisted(name: str) -> bool:
+    """Возвращает True, если предмет в актуальном блэклисте.
+
+    Если срок действия записи истёк, запись удаляется.
+    """
+
+    entry = priceAnalys.get_blacklist_entry(name)
+    if entry is None:
+        return False
+
+    expires_at_str = entry.get("expires_at")
+    try:
+        expires_at = datetime.fromisoformat(expires_at_str) if expires_at_str else None
+    except Exception:
+        expires_at = None
+
+    if expires_at and expires_at > datetime.utcnow():
+        return True
+
+    priceAnalys.remove_from_blacklist(name)
+    return False
+
+
+def fetch_market_items() -> List[Dict[str, object]]:
+    response = requests.get(MARKET_URL, timeout=config.HTTP_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+
+    if not isinstance(data, list):
+        raise ValueError("Ожидался список предметов из lis-skins")
+
+    items: List[Dict[str, object]] = []
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "")).strip()
+        price = raw.get("price")
+        try:
+            price_value = float(price)
+        except (TypeError, ValueError):
+            continue
+        items.append({"name": name, "price": price_value})
+    return items
+
+
+def filter_by_keywords_and_price(items: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
+    filtered: List[Dict[str, object]] = []
+    total = 0
+    for item in items:
+        total += 1
+        name = str(item.get("name", ""))
+        price = float(item.get("price", 0))
+        lower_name = name.lower()
+
+        if any(keyword.lower() in lower_name for keyword in config.LISS_BLACKLIST_KEYWORDS):
+            continue
+        if is_blacklisted(name):
+            continue
+        if price > config.LISS_MAX_PRICE:
+            continue
+        if price < config.LISS_EXTRA_MIN_PRICE:
+            continue
+
+        filtered.append({"name": name, "price": price})
+
+    print(f"[LISS] отсортировано {len(filtered)} из {total} предметов после первичных фильтров")
+    return filtered
+
+
+def load_known_items() -> List[Dict[str, object]]:
+    """Загружает предметы с рек. ценой и свежими данными."""
+
+    conn = priceAnalys.get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT item_name, rec_price, avg_sales, purchased_lots, purchased_sum, updated_at
+        FROM steam_items
+        WHERE rec_price IS NOT NULL
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items: List[Dict[str, object]] = []
+    now = datetime.utcnow()
+    for row in rows:
+        updated_at = row["updated_at"]
+        if updated_at and config.ACTUAL_HOURS > 0:
+            try:
+                dt_updated = datetime.fromisoformat(updated_at)
+            except Exception:
+                dt_updated = None
+            if dt_updated is not None:
+                age_hours = (now - dt_updated).total_seconds() / 3600.0
+                if age_hours > config.ACTUAL_HOURS:
+                    continue
+
+        items.append({
+            "name": row["item_name"],
+            "rec_price": float(row["rec_price"]),
+            "avg_sales": float(row["avg_sales"] or 0),
+            "purchased_lots": float(row["purchased_lots"] or 0),
+            "purchased_sum": float(row["purchased_sum"] or 0),
+        })
+    return items
+
+
+def within_purchase_limits(avg_sales: float, purchased_lots: float, purchased_sum: float) -> bool:
+    if avg_sales <= 0:
+        allowed_lots = float("inf")
+    else:
+        allowed_lots = avg_sales * (config.LISS_QUANTITY_PERCENT / 100.0)
+
+    return purchased_lots < allowed_lots and purchased_sum < config.LISS_SUM_LIMIT
+
+
+def evaluate_known_items(market_items: List[Dict[str, object]], known_items: List[Dict[str, object]]) -> List[str]:
+    market_map = {item["name"]: item for item in market_items}
+    processed: List[str] = []
+
+    for known in known_items:
+        name = known["name"]
+        market_item = market_map.get(name)
+        if not market_item:
+            continue
+
+        if not within_purchase_limits(
+            known["avg_sales"], known["purchased_lots"], known["purchased_sum"]
+        ):
+            continue
+
+        rec_price = float(known["rec_price"])
+        denom = rec_price * 0.8697 - 1
+        if denom <= 0:
+            continue
+
+        price = float(market_item["price"])
+        profit = price / denom
+        if profit > config.LISS_MIN_PROFIT:
+            print(f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - approve")
+            print("[LISS] предчек: предмет прошел фильтры и готов к парсингу id")
+            processed.append(name)
+
+    return processed
+
+
+def get_purchase_stats(name: str) -> Tuple[float, float, float]:
+    """Возвращает (avg_sales, purchased_lots, purchased_sum)."""
+
+    conn = priceAnalys.get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT avg_sales, purchased_lots, purchased_sum FROM steam_items WHERE item_name = ?",
+        (name,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return 0.0, 0.0, 0.0
+    return float(row["avg_sales"] or 0), float(row["purchased_lots"] or 0), float(row["purchased_sum"] or 0)
+
+
+def process_new_items(market_items: List[Dict[str, object]], processed_names: Iterable[str]) -> None:
+    processed_set = set(processed_names)
+
+    for item in market_items:
+        name = item["name"]
+        price = float(item["price"])
+        if name in processed_set:
+            continue
+        if price < config.LISS_MIN_PRICE:
+            continue
+        if is_blacklisted(name):
+            continue
+
+        avg_sales, purchased_lots, purchased_sum = get_purchase_stats(name)
+        if avg_sales > 0 and not within_purchase_limits(avg_sales, purchased_lots, purchased_sum):
+            continue
+        if purchased_sum >= config.LISS_SUM_LIMIT:
+            continue
+
+        # На этом шаге должен идти парсинг графика Steam и расчёт прибыли.
+        # Оставляем заглушку, чтобы обозначить прохождение фильтров.
+        print(
+            f"[LISS] новочек: {name} прошел фильтры и готов к парсингу id (price={price:.2f})"
+        )
+
+
+def main() -> None:
+    priceAnalys.init_db()
+    priceAnalys.load_proxies_from_file()
+
+    try:
+        market_items = fetch_market_items()
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
+        print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
+        sys.exit(1)
+
+    filtered_items = filter_by_keywords_and_price(market_items)
+    known_items = load_known_items()
+    processed_names = evaluate_known_items(filtered_items, known_items)
+    process_new_items(filtered_items, processed_names)
+
+
+if __name__ == "__main__":
+    main()

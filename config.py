@@ -17,6 +17,27 @@ HTML_FAILED_DIR = "HTML_steam_failed"
 SELL_PARSING_DIR = "sell_parsing"
 HTML_TEMP_DIR = "HTML_temp"
 
+# ------------ Liss bot settings ------------
+
+# Список ключевых слов, при наличии которых предмет отбрасывается
+LISS_BLACKLIST_KEYWORDS = []
+
+# Основной и дополнительный фильтры по цене лота, USD
+LISS_MIN_PRICE = 0.0
+LISS_EXTRA_MIN_PRICE = 0.0
+LISS_MAX_PRICE = 1000.0
+
+# Минимально допустимая прибыль лота (price / ((rec_price * 0.8697) - 1))
+LISS_MIN_PROFIT = 0.0
+
+# Максимальный срок холда предмета (0–8 дней)
+LISS_MAX_HOLD_DAYS = 0
+
+# Ограничения по количеству и сумме покупок
+LISS_QUANTITY_PERCENT = 10.0  # доля от средних продаж в неделю на Steam
+LISS_PERIOD_DAYS = 3  # период учёта для лимитов
+LISS_SUM_LIMIT = 50.0  # максимальная сумма покупок одного предмета за период
+
 # ------------ Caching / DB freshness ------------
 
 # Сколько часов результат по предмету считается актуальным
