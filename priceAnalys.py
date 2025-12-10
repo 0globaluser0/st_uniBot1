@@ -16,6 +16,13 @@ import requests
 import config
 
 
+# Состояние прямого IP для логики отдыха (как для прокси)
+direct_ip_state = {
+    "rest_until_ts": 0.0,
+    "fail_stage": 0,
+}
+
+
 @dataclass
 class Sale:
     dt: datetime
@@ -1827,6 +1834,34 @@ def build_requests_proxy(address: str) -> Dict[str, str]:
     }
 
 
+def direct_is_resting(now_ts: Optional[float] = None) -> bool:
+    if now_ts is None:
+        now_ts = time.time()
+    return direct_ip_state["rest_until_ts"] > now_ts
+
+
+def send_direct_to_rest(now_ts: Optional[float] = None) -> None:
+    """Отправляет прямой IP на отдых по той же схеме, что и прокси."""
+    if now_ts is None:
+        now_ts = time.time()
+
+    if direct_ip_state["fail_stage"] == 0:
+        rest_until = now_ts + config.REST_PROXY1
+        stage = 1
+        print(
+            f"[PROXY] Отправляем прямой IP на первый отдых на {config.REST_PROXY1} сек."
+        )
+    else:
+        rest_until = now_ts + config.REST_PROXY2
+        stage = 2
+        print(
+            f"[PROXY] Отправляем прямой IP на второй отдых на {config.REST_PROXY2} сек."
+        )
+
+    direct_ip_state["rest_until_ts"] = rest_until
+    direct_ip_state["fail_stage"] = stage
+
+
 def fetch_html_direct(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1844,9 +1879,18 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     """
     ensure_directories()
 
+    last_error_html: Optional[str] = None
+
     if config.PROXY_SELECT == 0:
         attempt = 0
         while attempt < config.MAX_HTML_RETRIES:
+            now_ts = time.time()
+            if direct_is_resting(now_ts):
+                remain = int(direct_ip_state["rest_until_ts"] - now_ts)
+                print(f"[PROXY] Прямой IP ещё отдыхает {remain} сек.")
+                time.sleep(max(1, min(remain, config.DELAY_DOWNLOAD_ERROR)))
+                continue
+
             attempt += 1
             try:
                 html = fetch_html_direct(url)
@@ -1857,6 +1901,14 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 with open(temp_path, "w", encoding="utf-8") as f:
                     f.write(html)
                 return html
+            except requests.HTTPError as e:
+                resp = e.response
+                if resp is not None and resp.status_code == 429:
+                    last_error_html = resp.text
+                    send_direct_to_rest(now_ts)
+                    continue
+                print(f"[DOWNLOAD] Ошибка прямого скачивания (попытка {attempt}): {e}")
+                time.sleep(config.DELAY_DOWNLOAD_ERROR)
             except requests.RequestException as e:
                 print(f"[DOWNLOAD] Ошибка прямого скачивания (попытка {attempt}): {e}")
                 time.sleep(config.DELAY_DOWNLOAD_ERROR)
@@ -1873,8 +1925,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             "id": None,
             "address": "DIRECT",
             "last_used_ts": 0.0,
-            "rest_until_ts": 0.0,
-            "fail_stage": 0,
+            "rest_until_ts": direct_ip_state["rest_until_ts"],
+            "fail_stage": direct_ip_state["fail_stage"],
             "fallback_fail_count": 0,
             "disabled": 0,
         }
@@ -1905,9 +1957,9 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
             if row["address"] == "DIRECT":
                 use_direct = True
                 proxy_id = None
-                rest_until_ts = 0.0
+                rest_until_ts = direct_ip_state["rest_until_ts"]
                 last_used_ts = 0.0
-                fail_stage = 0
+                fail_stage = direct_ip_state["fail_stage"]
                 fallback_fail_count = 0
             else:
                 use_direct = False
@@ -1919,9 +1971,10 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
             now_ts = time.time()
 
-            if not use_direct and rest_until_ts > now_ts:
+            if rest_until_ts > now_ts:
                 remain = int(rest_until_ts - now_ts)
-                print(f"[PROXY] Прокси {row['address']} ещё отдыхает {remain} сек.")
+                label = "прямой IP" if use_direct else f"прокси {row['address']}"
+                print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
                 continue
 
             if not config.DELAY_OFF and not use_direct and last_used_ts > 0:
@@ -1958,7 +2011,9 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                     last_error_html = text
                     print(f"[PROXY] 429 Too Many Requests от {row['address'] if not use_direct else 'DIRECT'}.")
 
-                    if not use_direct and proxy_id is not None:
+                    if use_direct:
+                        send_direct_to_rest()
+                    elif proxy_id is not None:
                         now_ts = time.time()
                         if fail_stage == 0:
                             rest_until = now_ts + config.REST_PROXY1
@@ -2007,6 +2062,12 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 )
                 if not use_direct and proxy_id is not None:
                     try:
+                        if direct_is_resting():
+                            remain = int(direct_ip_state["rest_until_ts"] - time.time())
+                            print(
+                                f"[DOWNLOAD] Прямой IP отдыхает, ждём {remain} сек и пробуем другие прокси."
+                            )
+                            continue
                         print("[DOWNLOAD] Пытаемся скачать через прямой IP после ошибки прокси...")
                         html = fetch_html_direct(url)
                         now_ts = time.time()
@@ -2040,6 +2101,36 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
                         set_last_proxy_position(idx)
                         return html
+                    except requests.HTTPError as e2:
+                        resp = e2.response
+                        if resp is not None and resp.status_code == 429:
+                            print(
+                                "[DOWNLOAD] Прямой IP вернул 429 при проверке соединения; "
+                                "считаем, что соединение есть."
+                            )
+                            send_direct_to_rest()
+                            now_ts = time.time()
+                            rest_until = now_ts + config.REST_PROXY1
+                            fallback_fail_count += 1
+                            disabled_flag = 0
+                            if fallback_fail_count >= config.MAX_FALLBACK_FAILS:
+                                disabled_flag = 1
+                                print(
+                                    f"[PROXY] Прокси {row['address']} "
+                                    f"навсегда отключен (слишком много сбоев)."
+                                )
+                            update_proxy_row(
+                                proxy_id,
+                                rest_until_ts=rest_until,
+                                fallback_fail_count=fallback_fail_count,
+                                disabled=disabled_flag,
+                            )
+                            continue
+                        print(
+                            f"[DOWNLOAD] Не удалось скачать через прямой IP после ошибки прокси: {e2}"
+                        )
+                        time.sleep(config.DELAY_DOWNLOAD_ERROR)
+                        continue
                     except requests.RequestException as e2:
                         print(
                             f"[DOWNLOAD] Не удалось скачать через прямой IP после ошибки прокси: {e2}"
