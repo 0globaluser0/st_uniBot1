@@ -32,24 +32,8 @@ def is_blacklisted(name: str) -> bool:
     Если срок действия записи истёк, запись удаляется.
     """
 
-    entry = priceAnalys.get_blacklist_entry(name)
-    if entry is None:
-        return False
-
-    try:
-        expires_at_str = entry["expires_at"]
-    except (KeyError, IndexError, TypeError):
-        expires_at_str = None
-    try:
-        expires_at = datetime.fromisoformat(expires_at_str) if expires_at_str else None
-    except Exception:
-        expires_at = None
-
-    if expires_at and expires_at > datetime.utcnow():
-        return True
-
-    priceAnalys.remove_from_blacklist(name)
-    return False
+    entry_info = priceAnalys.get_active_blacklist_entry(name)
+    return entry_info is not None
 
 
 def fetch_market_items() -> List[Dict[str, object]]:
