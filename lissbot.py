@@ -14,6 +14,7 @@ from urllib.parse import quote
 import requests
 
 import config
+import lis_api
 import priceAnalys
 
 MARKET_URL = "https://lis-skins.com/market_export_json/csgo.json"
@@ -252,6 +253,16 @@ def evaluate_known_items(
                 "[LISS] предчек: предмет прошел фильтры и готов к парсингу id "
                 f"(qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})"
             )
+            try:
+                lis_api.process_item(
+                    name,
+                    int(quantity_max_allowed),
+                    float(sum_max_allowed),
+                )
+            except Exception as exc:
+                print(
+                    f"[LISS][ERROR] Ошибка при запросе LIS API для предчека {name}: {exc}"
+                )
             profit_passed += 1
         else:
             passed_filters += 1
@@ -446,6 +457,17 @@ def process_new_items(
                 f"\033[92mapprove\033[0m (qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})",
                 proxy_tag=proxy_tag,
             )
+            try:
+                lis_api.process_item(
+                    name,
+                    int(quantity_max_allowed),
+                    float(sum_max_allowed),
+                )
+            except Exception as exc:
+                print(
+                    f"[LISS][ERROR] Ошибка при запросе LIS API для новочек {name}: {exc}",
+                    proxy_tag=proxy_tag,
+                )
         else:
             print(
                 f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога",
