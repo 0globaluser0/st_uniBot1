@@ -1,5 +1,6 @@
 # priceAnalys.py - core logic: downloading Steam pages, parsing sales, analysing price
 
+import builtins
 import os
 import re
 import json
@@ -16,10 +17,66 @@ import requests
 import config
 
 
+# ---------- Logging helpers ----------
+
+LOG_CONTEXT: Dict[str, Any] = {
+    "proxy_tag": None,
+    "current": None,
+    "total": None,
+}
+
+
+def set_proxy_tag(tag: Optional[str]) -> None:
+    LOG_CONTEXT["proxy_tag"] = tag
+
+
+def set_progress(current: Optional[int], total: Optional[int]) -> None:
+    LOG_CONTEXT["current"] = current
+    LOG_CONTEXT["total"] = total
+
+
+def _build_log_prefix(proxy_tag: Optional[str] = None, counter: Optional[str] = None) -> str:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    parts = [timestamp]
+
+    resolved_proxy_tag = proxy_tag if proxy_tag is not None else LOG_CONTEXT.get("proxy_tag")
+    if resolved_proxy_tag:
+        parts.append(str(resolved_proxy_tag))
+
+    if counter is None:
+        current = LOG_CONTEXT.get("current")
+        total = LOG_CONTEXT.get("total")
+        if current is not None and total is not None:
+            counter = f"{current}/{total}"
+    if counter:
+        parts.append(str(counter))
+
+    return " ".join(parts)
+
+
+def _patched_print(*args: Any, proxy_tag: Optional[str] = None, counter: Optional[str] = None, **kwargs: Any) -> None:
+    original = getattr(builtins, "_original_print", builtins.print)
+    prefix = _build_log_prefix(proxy_tag=proxy_tag, counter=counter)
+
+    if args:
+        new_first = f"{prefix} {args[0]}"
+        args = (new_first, *args[1:])
+    else:
+        args = (prefix,)
+
+    original(*args, **kwargs)
+
+
+if not hasattr(builtins, "_original_print"):
+    builtins._original_print = builtins.print
+    builtins.print = _patched_print
+
+
 # Состояние прямого IP для логики отдыха (как для прокси)
 direct_ip_state = {
     "rest_until_ts": 0.0,
     "fail_stage": 0,
+    "last_used_ts": 0.0,
 }
 
 
@@ -39,6 +96,9 @@ class Sale:
 
 # ---------- Filesystem helpers ----------
 
+REST_TIME_FORMAT = "%Y.%m.%d %H:%M:%S"
+
+
 def ensure_directories() -> None:
     for path in [
         config.HTML_APPROVE_DIR,
@@ -56,6 +116,49 @@ def safe_filename(name: str) -> str:
 
 
 # ---------- DB helpers ----------
+
+
+def serialize_rest_until(rest_until_ts: float) -> str:
+    """Преобразует таймстамп отдыха в формат YYYY.MM.DD HH:MM:SS."""
+
+    if rest_until_ts <= 0:
+        return ""
+    return datetime.fromtimestamp(rest_until_ts).strftime(REST_TIME_FORMAT)
+
+
+def deserialize_rest_until(value: Any) -> float:
+    """Возвращает таймстамп отдыха из БД (строка в привычном формате или число)."""
+
+    if not value:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        dt = datetime.strptime(str(value), REST_TIME_FORMAT)
+        return dt.timestamp()
+    except ValueError:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def parse_db_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, (int, float)) and value == 0:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def format_db_timestamp(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    return dt.isoformat(timespec="seconds")
+
 
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
@@ -81,6 +184,33 @@ def get_rec_price_blacklist_conn() -> sqlite3.Connection:
     return conn
 
 
+def update_purchase_tracking(
+    item_name: str,
+    purchased_lots: float,
+    purchased_sum: float,
+    time_lots: Optional[datetime],
+    time_sum: Optional[datetime],
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE steam_items
+        SET purchased_lots = ?, purchased_sum = ?, time_lots = ?, time_sum = ?
+        WHERE item_name = ?
+        """,
+        (
+            purchased_lots,
+            purchased_sum,
+            format_db_timestamp(time_lots),
+            format_db_timestamp(time_sum),
+            item_name,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def init_db() -> None:
     ensure_directories()
     conn = get_conn()
@@ -99,7 +229,9 @@ def init_db() -> None:
             updated_at     TEXT,
             sales_points   INTEGER,
             purchased_lots REAL DEFAULT 0,
-            purchased_sum  REAL DEFAULT 0
+            purchased_sum  REAL DEFAULT 0,
+            time_lots      TEXT,
+            time_sum       TEXT
         )
         """
     )
@@ -115,6 +247,10 @@ def init_db() -> None:
         cur.execute(
             "ALTER TABLE steam_items ADD COLUMN purchased_sum REAL DEFAULT 0"
         )
+    if "time_lots" not in existing_columns:
+        cur.execute("ALTER TABLE steam_items ADD COLUMN time_lots TEXT")
+    if "time_sum" not in existing_columns:
+        cur.execute("ALTER TABLE steam_items ADD COLUMN time_sum TEXT")
 
     conn.commit()
     conn.close()
@@ -128,7 +264,7 @@ def init_db() -> None:
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             address             TEXT UNIQUE,
             last_used_ts        REAL,
-            rest_until_ts       REAL,
+            rest_until_ts       TEXT,
             fail_stage          INTEGER DEFAULT 0,
             fallback_fail_count INTEGER DEFAULT 0,
             disabled            INTEGER DEFAULT 0
@@ -189,7 +325,7 @@ def upsert_proxy(address: str) -> None:
         """
         INSERT OR IGNORE INTO proxies(address, last_used_ts, rest_until_ts, fail_stage,
                                       fallback_fail_count, disabled)
-        VALUES(?, 0, 0, 0, 0, 0)
+        VALUES(?, 0, '', 0, 0, 0)
         """,
         (address,),
     )
@@ -1969,7 +2105,7 @@ def update_proxy_row(
         params.append(last_used_ts)
     if rest_until_ts is not None:
         sets.append("rest_until_ts = ?")
-        params.append(rest_until_ts)
+        params.append(serialize_rest_until(rest_until_ts))
     if fail_stage is not None:
         sets.append("fail_stage = ?")
         params.append(fail_stage)
@@ -2039,6 +2175,7 @@ def fetch_html_direct(url: str) -> str:
     }
     resp = requests.get(url, headers=headers, timeout=config.HTTP_TIMEOUT)
     resp.raise_for_status()
+    direct_ip_state["last_used_ts"] = time.time()
     return resp.text
 
 
@@ -2051,6 +2188,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     last_error_html: Optional[str] = None
 
     if config.PROXY_SELECT == 0:
+        set_proxy_tag("direct")
         attempt = 0
         while attempt < config.MAX_HTML_RETRIES:
             now_ts = time.time()
@@ -2059,6 +2197,13 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
                 print(f"[PROXY] Прямой IP ещё отдыхает {remain} сек.")
                 time.sleep(max(1, min(remain, config.DELAY_DOWNLOAD_ERROR)))
                 continue
+
+            if not config.DELAY_OFF and direct_ip_state["last_used_ts"] > 0:
+                delta = now_ts - direct_ip_state["last_used_ts"]
+                if delta < config.DELAY_HTML:
+                    wait_sec = int(config.DELAY_HTML - delta)
+                    time.sleep(max(wait_sec, 1))
+                    continue
 
             attempt += 1
             try:
@@ -2093,7 +2238,7 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
         direct_entry = {
             "id": None,
             "address": "DIRECT",
-            "last_used_ts": 0.0,
+            "last_used_ts": direct_ip_state["last_used_ts"],
             "rest_until_ts": direct_ip_state["rest_until_ts"],
             "fail_stage": direct_ip_state["fail_stage"],
             "fallback_fail_count": 0,
@@ -2116,24 +2261,27 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
     last_error_html: Optional[str] = None
 
     while attempt < config.MAX_HTML_RETRIES:
-        attempt += 1
- #       print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
+        attempted_request = False
+        min_rest_remain: Optional[int] = None
+#       print(f"[DOWNLOAD] Попытка #{attempt} скачивания HTML...")
 
         for offset in range(cycle_len):
             idx = (start_index + offset) % cycle_len
             row = proxy_cycle[idx]
+            proxy_tag = f"proxy{idx}" if row["address"] != "DIRECT" else "direct"
+            set_proxy_tag(proxy_tag)
 
             if row["address"] == "DIRECT":
                 use_direct = True
                 proxy_id = None
                 rest_until_ts = direct_ip_state["rest_until_ts"]
-                last_used_ts = 0.0
+                last_used_ts = direct_ip_state["last_used_ts"]
                 fail_stage = direct_ip_state["fail_stage"]
                 fallback_fail_count = 0
             else:
                 use_direct = False
                 proxy_id = row["id"]
-                rest_until_ts = row["rest_until_ts"] or 0.0
+                rest_until_ts = deserialize_rest_until(row["rest_until_ts"])
                 last_used_ts = row["last_used_ts"] or 0.0
                 fail_stage = row["fail_stage"] or 0
                 fallback_fail_count = row["fallback_fail_count"] or 0
@@ -2142,19 +2290,20 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
             if rest_until_ts > now_ts:
                 remain = int(rest_until_ts - now_ts)
+                if min_rest_remain is None or remain < min_rest_remain:
+                    min_rest_remain = remain
                 label = "прямой IP" if use_direct else f"прокси {row['address']}"
                # print(f"[PROXY] {label} ещё отдыхает {remain} сек.")
                 continue
 
-            if not config.DELAY_OFF and not use_direct and last_used_ts > 0:
+            if not config.DELAY_OFF and last_used_ts > 0:
                 delta = now_ts - last_used_ts
                 if delta < config.DELAY_HTML:
                     wait_sec = int(config.DELAY_HTML - delta)
-                    #print(
-                    #    f"[PROXY] Высокая нагрузка на прокси {row['address']}, "
-                    #    f"ждём {wait_sec} сек."
-                    #)
                     time.sleep(max(wait_sec, 1))
+                    now_ts = time.time()
+
+            attempted_request = True
 
             try:
                 if use_direct:
@@ -2207,6 +2356,8 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
                 if not use_direct and proxy_id is not None:
                     update_proxy_row(proxy_id, last_used_ts=time.time())
+                elif use_direct:
+                    direct_ip_state["last_used_ts"] = time.time()
 
                 temp_path = os.path.join(
                     config.HTML_TEMP_DIR,
@@ -2302,6 +2453,17 @@ def fetch_html_with_proxies(url: str, item_name: str) -> str:
 
         start_index = (start_index + 1) % cycle_len
 
+        if attempted_request:
+            attempt += 1
+        else:
+            sleep_sec = min_rest_remain if min_rest_remain is not None else config.DELAY_DOWNLOAD_ERROR
+            sleep_sec = max(int(sleep_sec), 1)
+            print(
+                f"[PROXY] Все прокси и прямой IP отдыхают, ждём {sleep_sec} сек до следующей попытки."
+            )
+            time.sleep(sleep_sec)
+            continue
+
     if last_error_html:
         temp_path = os.path.join(
             config.HTML_FAILED_DIR,
@@ -2328,20 +2490,29 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     """
     ensure_directories()
 
+    def finalize_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload["proxy_tag"] = LOG_CONTEXT.get("proxy_tag")
+        set_proxy_tag(None)
+        return payload
+
     url = url.strip()
     if not (url.startswith("http://") or url.startswith("https://")):
-        return {
-            "status": "invalid_link",
-            "message": "not correct link",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link",
+                "item_name": None,
+            }
+        )
 
     if "steamcommunity.com/market/listings/" not in url:
-        return {
-            "status": "invalid_link",
-            "message": "not correct link",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link",
+                "item_name": None,
+            }
+        )
 
     game_code = None
     item_encoded = None
@@ -2356,20 +2527,24 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
         game_code = 570
         item_encoded = m_570.group(1)
     else:
-        return {
-            "status": "invalid_link",
-            "message": "not correct link (dont found game code)",
-            "item_name": None,
-        }
+        return finalize_result(
+            {
+                "status": "invalid_link",
+                "message": "not correct link (dont found game code)",
+                "item_name": None,
+            }
+        )
 
     item_name = unquote(item_encoded)
 
     if game_code == 570:
-        return {
-            "status": "dota_soon",
-            "message": "dota soon",
-            "item_name": item_name,
-        }
+        return finalize_result(
+            {
+                "status": "dota_soon",
+                "message": "dota soon",
+                "item_name": item_name,
+            }
+        )
 
     # --- Проверяем кэш ---
     row = get_cached_item(item_name)
@@ -2389,15 +2564,17 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
                     f"tier={row['tier']}, type={row['graph_type']} "
                     f"(возраст {age_hours:.2f} ч)"
                 )
-                return {
-                    "status": "ok",
-                    "item_name": item_name,
-                    "rec_price": float(row["rec_price"]),
-                    "avg_sales": float(row["avg_sales"]),
-                    "tier": int(row["tier"]),
-                    "graph_type": row["graph_type"],
-                    "message": "from_cache",
-                }
+                return finalize_result(
+                    {
+                        "status": "ok",
+                        "item_name": item_name,
+                        "rec_price": float(row["rec_price"]),
+                        "avg_sales": float(row["avg_sales"]),
+                        "tier": int(row["tier"]),
+                        "graph_type": row["graph_type"],
+                        "message": "from_cache",
+                    }
+                )
 
     # --- Проверяем блэклист ---
     bl_info = get_active_blacklist_entry(item_name)
@@ -2409,11 +2586,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             f"[BLACKLIST] {item_name} в блэклисте до {expires_at_str}. "
             f"reason={reason} (source={bl_info['source']})"
         )
-        return {
-            "status": "blacklist",
-            "item_name": item_name,
-            "reason": reason,
-        }
+        return finalize_result(
+            {
+                "status": "blacklist",
+                "item_name": item_name,
+                "reason": reason,
+            }
+        )
 
     # --- Скачиваем HTML ---
     try:
@@ -2421,11 +2600,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     except Exception as e:
         msg = f"Ошибка при скачивании HTML: {e}"
         print(f"[ERROR] {msg}")
-        return {
-            "status": "error",
-            "item_name": item_name,
-            "message": msg,
-        }
+        return finalize_result(
+            {
+                "status": "error",
+                "item_name": item_name,
+                "message": msg,
+            }
+        )
 
     # --- Парсим продажи ---
     sales: List[Sale] = []
@@ -2458,23 +2639,27 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
 
         msg = f"Не удалось распарсить продажи после нескольких попыток. last_error={last_error}"
         print(f"[ERROR] {msg}")
-        return {
-            "status": "error",
-            "item_name": item_name,
-            "message": msg,
-        }
+        return finalize_result(
+            {
+                "status": "error",
+                "item_name": item_name,
+                "message": msg,
+            }
+        )
 
     metrics = compute_basic_metrics(sales)
 
     total_amount_30d = sum(s.amount for s in sales)
     if total_amount_30d < config.MIN_TOTAL_AMOUNT_30D:
         reason = f"too_low_volume_30d ({total_amount_30d} < {config.MIN_TOTAL_AMOUNT_30D})"
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            base_price=metrics.get("base_price"),
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                base_price=metrics.get("base_price"),
+                log_reason=log_blacklist_reason,
+            )
         )
 
     # Ранний фильтр по гэпу должен срабатывать сразу после проверки объёма,
@@ -2491,8 +2676,10 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             f">= {config.MAX_GAP_BETWEEN_POINTS_HOURS:.1f}h within "
             f"{config.GAP_FILTER_WINDOW_DAYS}d; max_gap={max_gap_hours:.1f}h)"
         )
-        return blacklist_with_html(
-            item_name, reason, html, base_price=metrics.get("base_price")
+        return finalize_result(
+            blacklist_with_html(
+                item_name, reason, html, base_price=metrics.get("base_price")
+            )
         )
     dips = compute_price_dips(sales, metrics)
 
@@ -2516,11 +2703,13 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     if shape_result["status"] == "blacklist":
         reason = shape_result["reason"]
         #print(f"[RESULT] BLACKLIST. {item_name}: {reason}")
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            base_price=metrics.get("base_price"),
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                base_price=metrics.get("base_price"),
+            )
         )
 
     rec_price = float(shape_result["rec_price"])
@@ -2560,13 +2749,15 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             "rec_price_below_minimum "
             f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD1:.4f})"
         )
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
-            rec_price_blacklist=True,
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                days=config.MIN_REC_PRICE_BLACKLIST_DAYS1,
+                rec_price_blacklist=True,
+                log_reason=log_blacklist_reason,
+            )
         )
 
     if rec_price < config.MIN_REC_PRICE_USD2:
@@ -2574,13 +2765,15 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
             "rec_price_below_secondary_minimum "
             f"({rec_price:.4f} < {config.MIN_REC_PRICE_USD2:.4f})"
         )
-        return blacklist_with_html(
-            item_name,
-            reason,
-            html,
-            days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
-            rec_price_blacklist=True,
-            log_reason=log_blacklist_reason,
+        return finalize_result(
+            blacklist_with_html(
+                item_name,
+                reason,
+                html,
+                days=config.MIN_REC_PRICE_BLACKLIST_DAYS2,
+                rec_price_blacklist=True,
+                log_reason=log_blacklist_reason,
+            )
         )
 
     avg_sales = compute_avg_sales_last_two_weeks(sales)
@@ -2611,12 +2804,14 @@ def parsing_steam_sales(url: str, *, log_blacklist_reason: bool = True) -> Dict[
     except Exception:
         pass
 
-    return {
-        "status": "ok",
-        "item_name": item_name,
-        "rec_price": rec_price,
-        "avg_sales": avg_sales,
-        "tier": tier,
-        "graph_type": graph_type,
-        "message": reason,
-    }
+    return finalize_result(
+        {
+            "status": "ok",
+            "item_name": item_name,
+            "rec_price": rec_price,
+            "avg_sales": avg_sales,
+            "tier": tier,
+            "graph_type": graph_type,
+            "message": reason,
+        }
+    )
