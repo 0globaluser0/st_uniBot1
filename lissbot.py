@@ -7,6 +7,7 @@
 
 import json
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
@@ -17,6 +18,8 @@ import config
 import priceAnalys
 
 MARKET_URL = "https://lis-skins.com/market_export_json/csgo.json"
+API_FULL_URL = "https://lis-skins.com/market_export_json/api_csgo_full.json"
+API_FULL_FILENAME = "api_csgo_full.json"
 STEAM_BASE_URL = "https://steamcommunity.com/market/listings/730/"
 
 
@@ -24,6 +27,19 @@ def build_steam_url(name: str) -> str:
     """Формирует ссылку на страницу предмета в Steam."""
 
     return f"{STEAM_BASE_URL}{quote(name)}"
+
+
+def download_api_full_json(save_path: str = API_FULL_FILENAME) -> None:
+    """Скачивает расширенный прайс-лист и сохраняет в корень проекта."""
+
+    print(f"[LISS][API] Скачиваем {API_FULL_URL} -> {save_path}")
+    response = requests.get(API_FULL_URL, timeout=config.HTTP_TIMEOUT)
+    response.raise_for_status()
+
+    with open(save_path, "wb") as f:
+        f.write(response.content)
+
+    print(f"[LISS][API] Файл {save_path} обновлён ({len(response.content)} байт)")
 
 
 def is_blacklisted(name: str) -> bool:
@@ -193,7 +209,7 @@ def evaluate_purchase_limits(
 def evaluate_known_items(
     market_items: List[Dict[str, object]],
     known_items: List[Dict[str, object]],
-    stop_at: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Tuple[List[str], int, int]:
     market_map = {item["name"]: item for item in market_items}
     candidates = [item for item in known_items if item["name"] in market_map]
@@ -206,6 +222,10 @@ def evaluate_known_items(
 
     total = len(candidates)
     for idx, known in enumerate(candidates, start=1):
+        if stop_event is not None and stop_event.is_set():
+            print("[LISS][TIMER] Обновление api_csgo_full.json завершено, прерываем проверку известных предметов.")
+            break
+
         priceAnalys.set_progress(idx, total)
         name = known["name"]
         market_item = market_map.get(name)
@@ -256,8 +276,8 @@ def evaluate_known_items(
         else:
             passed_filters += 1
 
-        if stop_at is not None and time.time() >= stop_at:
-            print("[LISS][TIMER] Таймер сработал во время проверки известных предметов, завершаем итерацию.")
+        if stop_event is not None and stop_event.is_set():
+            print("[LISS][TIMER] Обновление api_csgo_full.json завершено, завершаем проверку известных предметов.")
             break
 
     priceAnalys.set_progress(None, None)
@@ -299,7 +319,9 @@ def get_purchase_stats(name: str) -> Dict[str, object]:
 
 
 def process_new_items(
-    market_items: List[Dict[str, object]], processed_names: Iterable[str], stop_at: Optional[float] = None
+    market_items: List[Dict[str, object]],
+    processed_names: Iterable[str],
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     processed_set = set(processed_names)
 
@@ -344,6 +366,10 @@ def process_new_items(
 
     total = len(targets)
     for idx, item in enumerate(targets, start=1):
+        if stop_event is not None and stop_event.is_set():
+            print("[LISS][TIMER] Обновление api_csgo_full.json завершено, прерываем обработку новочек.")
+            break
+
         priceAnalys.set_progress(idx, total)
         name = item["name"]
         price = float(item["price"])
@@ -452,14 +478,14 @@ def process_new_items(
                 proxy_tag=proxy_tag,
             )
 
-        if stop_at is not None and time.time() >= stop_at:
-            print("[LISS][TIMER] Таймер сработал во время обработки новочек, завершаем итерацию.")
+        if stop_event is not None and stop_event.is_set():
+            print("[LISS][TIMER] Обновление api_csgo_full.json завершено, завершаем обработку новочек.")
             break
 
     priceAnalys.set_progress(None, None)
 
 
-def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: float) -> None:
+def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_event: threading.Event) -> None:
     priceAnalys.set_proxy_tag(None)
     priceAnalys.set_progress(None, None)
     print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
@@ -473,7 +499,7 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: fl
     filtered_items = filter_by_keywords_and_price(market_items)
     known_items = load_known_items()
     processed_names, passed_filters, profit_passed = evaluate_known_items(
-        filtered_items, known_items, stop_at
+        filtered_items, known_items, stop_event
     )
     remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
     print(
@@ -483,11 +509,11 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: fl
         f"по прибыли {profit_passed}, "
         f"для новочек осталось {remaining_for_newcheck}"
     )
-    if stop_at is not None and time.time() >= stop_at:
-        print("[LISS][TIMER] Таймер сработал после предчека, запускаем следующий цикл без обработки новочек.")
+    if stop_event.is_set():
+        print("[LISS][TIMER] Обновление api_csgo_full.json завершено после предчека, запуск следующего цикла.")
         return
 
-    process_new_items(filtered_items, processed_names, stop_at)
+    process_new_items(filtered_items, processed_names, stop_event)
 
 
 def main() -> None:
@@ -498,25 +524,36 @@ def main() -> None:
     orange = "\033[38;5;208m"
     reset = "\033[0m"
 
-    next_refresh_start = time.time()
+    print("[LISS][API] Первичная загрузка api_csgo_full.json перед началом цикла")
+    download_api_full_json()
 
     while True:
         try:
-            now = time.time()
-            if now < next_refresh_start:
-                time.sleep(next_refresh_start - now)
+            stop_event = threading.Event()
 
-            iteration_started_at = time.time()
-            stop_at = iteration_started_at + refresh_seconds
-            run_refresh_cycle(refresh_seconds, orange, reset, stop_at)
+            def delayed_api_refresh() -> None:
+                try:
+                    time.sleep(refresh_seconds)
+                    print(
+                        "[LISS][TIMER] Пора обновить api_csgo_full.json, запускаем загрузку во втором потоке."
+                    )
+                    download_api_full_json()
+                except Exception as exc:  # pragma: no cover - чтобы не упасть при сетевых сбоях
+                    print(f"[LISS][ERROR] Ошибка при обновлении api_csgo_full.json: {exc}")
+                finally:
+                    stop_event.set()
 
-            next_refresh_start = iteration_started_at + refresh_seconds
+            timer_thread = threading.Thread(target=delayed_api_refresh, daemon=True)
+            timer_thread.start()
+
+            run_refresh_cycle(refresh_seconds, orange, reset, stop_event)
+
+            timer_thread.join()
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
             break
         except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
             print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
-            next_refresh_start = time.time() + refresh_seconds
 
 
 if __name__ == "__main__":
