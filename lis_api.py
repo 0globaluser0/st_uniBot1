@@ -274,8 +274,13 @@ def process_item(
         filtered_items.append(
             {
                 "id": it.get("id"),
+                "name": it.get("name"),
                 "price": price,
                 "unlock_at": unlock_at,
+                "created_at": it.get("created_at"),
+                "item_float": it.get("item_float"),
+                "hold": it.get("hold"),
+                "stickers": it.get("stickers") or [],
                 "hold_days": hold_days,
             }
         )

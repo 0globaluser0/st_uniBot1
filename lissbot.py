@@ -15,6 +15,7 @@ import requests
 
 import config
 import lis_api
+import lis_purchase
 import priceAnalys
 
 MARKET_URL = "https://lis-skins.com/market_export_json/csgo.json"
@@ -254,11 +255,19 @@ def evaluate_known_items(
                 f"(qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})"
             )
             try:
-                lis_api.process_item(
+                parsed = lis_api.process_item(
                     name,
                     int(quantity_max_allowed),
                     float(sum_max_allowed),
                 )
+                if parsed.get("final_quantity"):
+                    try:
+                        lis_purchase.purchase_items(parsed.get("items", []), account_name=parsed.get("account"))
+                    except Exception as exc:
+                        print(
+                            f"[LISS][ERROR] Ошибка при покупке для предчека {name}: {exc}",
+                            proxy_tag=proxy_tag,
+                        )
             except Exception as exc:
                 print(
                     f"[LISS][ERROR] Ошибка при запросе LIS API для предчека {name}: {exc}"
@@ -458,11 +467,19 @@ def process_new_items(
                 proxy_tag=proxy_tag,
             )
             try:
-                lis_api.process_item(
+                parsed = lis_api.process_item(
                     name,
                     int(quantity_max_allowed),
                     float(sum_max_allowed),
                 )
+                if parsed.get("final_quantity"):
+                    try:
+                        lis_purchase.purchase_items(parsed.get("items", []), account_name=parsed.get("account"))
+                    except Exception as exc:
+                        print(
+                            f"[LISS][ERROR] Ошибка при покупке для новочек {name}: {exc}",
+                            proxy_tag=proxy_tag,
+                        )
             except Exception as exc:
                 print(
                     f"[LISS][ERROR] Ошибка при запросе LIS API для новочек {name}: {exc}",
