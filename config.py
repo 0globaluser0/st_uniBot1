@@ -44,7 +44,8 @@ LISS_MAX_HOLD_DAYS = 8
 
 # Ограничения по количеству и сумме покупок
 LISS_QUANTITY_PERCENT = 30.0  # доля от средних продаж в неделю на Steam
-LISS_PERIOD_DAYS = 7  # период учёта для лимитов
+LISS_LOTS_PERIOD_DAYS = 7  # период учёта для лимитов по количеству
+LISS_SUM_PERIOD_DAYS = 7  # период учёта для лимитов по сумме
 LISS_SUM_LIMIT = 20.0  # максимальная сумма покупок одного предмета за период
 
 # ------------ Caching / DB freshness ------------

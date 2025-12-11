@@ -7,7 +7,7 @@
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -89,7 +89,8 @@ def load_known_items() -> List[Dict[str, object]]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT item_name, rec_price, avg_sales, purchased_lots, purchased_sum, updated_at
+        SELECT item_name, rec_price, avg_sales, purchased_lots, purchased_sum,
+               time_lots, time_sum, updated_at
         FROM steam_items
         WHERE rec_price IS NOT NULL
         """
@@ -117,17 +118,76 @@ def load_known_items() -> List[Dict[str, object]]:
             "avg_sales": float(row["avg_sales"] or 0),
             "purchased_lots": float(row["purchased_lots"] or 0),
             "purchased_sum": float(row["purchased_sum"] or 0),
+            "time_lots": row["time_lots"],
+            "time_sum": row["time_sum"],
         })
     return items
 
 
-def within_purchase_limits(avg_sales: float, purchased_lots: float, purchased_sum: float) -> bool:
-    if avg_sales <= 0:
-        allowed_lots = float("inf")
-    else:
-        allowed_lots = avg_sales * (config.LISS_QUANTITY_PERCENT / 100.0)
+def evaluate_purchase_limits(
+    name: str,
+    avg_sales: float,
+    purchased_lots: float,
+    purchased_sum: float,
+    time_lots: Optional[object],
+    time_sum: Optional[object],
+    *,
+    has_db_entry: bool,
+    proxy_tag: Optional[str] = None,
+) -> Optional[Tuple[float, float, float, float, Optional[datetime], Optional[datetime]]]:
+    now = datetime.utcnow()
+    base_allowed_lots = (config.LISS_QUANTITY_PERCENT * avg_sales) / 100.0
+    quantity_max_allowed = base_allowed_lots
+    sum_max_allowed = config.LISS_SUM_LIMIT
 
-    return purchased_lots < allowed_lots and purchased_sum < config.LISS_SUM_LIMIT
+    normalized_time_lots = priceAnalys.parse_db_timestamp(time_lots)
+    normalized_time_sum = priceAnalys.parse_db_timestamp(time_sum)
+    updated_lots = purchased_lots
+    updated_sum = purchased_sum
+    updated_time_lots = normalized_time_lots
+    updated_time_sum = normalized_time_sum
+    changed = False
+
+    if has_db_entry:
+        if normalized_time_lots and now - normalized_time_lots < timedelta(days=config.LISS_LOTS_PERIOD_DAYS):
+            quantity_max_allowed = base_allowed_lots - purchased_lots
+            if quantity_max_allowed <= 0:
+                print(f"[LISS][INFO] {name} достиг лимита по кол-ву", proxy_tag=proxy_tag)
+                return None
+        else:
+            updated_lots = 0.0
+            updated_time_lots = now
+            quantity_max_allowed = base_allowed_lots
+            changed = True
+
+        if normalized_time_sum and now - normalized_time_sum < timedelta(days=config.LISS_SUM_PERIOD_DAYS):
+            sum_max_allowed = config.LISS_SUM_LIMIT - purchased_sum
+            if sum_max_allowed <= 0:
+                print(f"[LISS][INFO] {name} достиг лимита по сумме", proxy_tag=proxy_tag)
+                return None
+        else:
+            updated_sum = 0.0
+            updated_time_sum = now
+            sum_max_allowed = config.LISS_SUM_LIMIT
+            changed = True
+
+        if changed:
+            priceAnalys.update_purchase_tracking(
+                name,
+                updated_lots,
+                updated_sum,
+                updated_time_lots,
+                updated_time_sum,
+            )
+
+    return (
+        quantity_max_allowed,
+        sum_max_allowed,
+        updated_lots,
+        updated_sum,
+        updated_time_lots,
+        updated_time_sum,
+    )
 
 
 def evaluate_known_items(
@@ -152,10 +212,25 @@ def evaluate_known_items(
 
         processed.append(name)
 
-        if not within_purchase_limits(
-            known["avg_sales"], known["purchased_lots"], known["purchased_sum"]
-        ):
+        limits = evaluate_purchase_limits(
+            name,
+            known["avg_sales"],
+            known["purchased_lots"],
+            known["purchased_sum"],
+            known.get("time_lots"),
+            known.get("time_sum"),
+            has_db_entry=True,
+        )
+        if limits is None:
             continue
+        (
+            quantity_max_allowed,
+            sum_max_allowed,
+            purchased_lots,
+            purchased_sum,
+            _,
+            _,
+        ) = limits
 
         rec_price = float(known["rec_price"])
         adjusted_rec_price = rec_price * 0.8697
@@ -171,9 +246,12 @@ def evaluate_known_items(
             passed_filters += 1
             print(
                 f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
-                f"{green}approve{reset}"
+                f"{green}approve{reset} (qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})"
             )
-            print("[LISS] предчек: предмет прошел фильтры и готов к парсингу id")
+            print(
+                "[LISS] предчек: предмет прошел фильтры и готов к парсингу id "
+                f"(qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})"
+            )
             profit_passed += 1
         else:
             passed_filters += 1
@@ -186,20 +264,38 @@ def evaluate_known_items(
     return processed, passed_filters, profit_passed
 
 
-def get_purchase_stats(name: str) -> Tuple[float, float, float]:
-    """Возвращает (avg_sales, purchased_lots, purchased_sum)."""
+def get_purchase_stats(name: str) -> Dict[str, object]:
+    """Возвращает словарь с данными по покупкам и признаком наличия в БД."""
 
     conn = priceAnalys.get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT avg_sales, purchased_lots, purchased_sum FROM steam_items WHERE item_name = ?",
+        """
+        SELECT avg_sales, purchased_lots, purchased_sum, time_lots, time_sum
+        FROM steam_items
+        WHERE item_name = ?
+        """,
         (name,),
     )
     row = cur.fetchone()
     conn.close()
     if row is None:
-        return 0.0, 0.0, 0.0
-    return float(row["avg_sales"] or 0), float(row["purchased_lots"] or 0), float(row["purchased_sum"] or 0)
+        return {
+            "exists": False,
+            "avg_sales": 0.0,
+            "purchased_lots": 0.0,
+            "purchased_sum": 0.0,
+            "time_lots": None,
+            "time_sum": None,
+        }
+    return {
+        "exists": True,
+        "avg_sales": float(row["avg_sales"] or 0),
+        "purchased_lots": float(row["purchased_lots"] or 0),
+        "purchased_sum": float(row["purchased_sum"] or 0),
+        "time_lots": row["time_lots"],
+        "time_sum": row["time_sum"],
+    }
 
 
 def process_new_items(
@@ -218,21 +314,49 @@ def process_new_items(
         if is_blacklisted(name):
             continue
 
-        avg_sales, purchased_lots, purchased_sum = get_purchase_stats(name)
-        if avg_sales > 0 and not within_purchase_limits(
-            avg_sales, purchased_lots, purchased_sum
-        ):
+        purchase_stats = get_purchase_stats(name)
+        avg_sales = float(purchase_stats.get("avg_sales", 0))
+        purchased_lots = float(purchase_stats.get("purchased_lots", 0))
+        purchased_sum = float(purchase_stats.get("purchased_sum", 0))
+        limits = evaluate_purchase_limits(
+            name,
+            avg_sales,
+            purchased_lots,
+            purchased_sum,
+            purchase_stats.get("time_lots"),
+            purchase_stats.get("time_sum"),
+            has_db_entry=bool(purchase_stats.get("exists")),
+        )
+        if limits is None:
             continue
-        if purchased_sum >= config.LISS_SUM_LIMIT:
-            continue
+        (
+            quantity_max_allowed,
+            sum_max_allowed,
+            purchased_lots,
+            purchased_sum,
+            time_lots,
+            time_sum,
+        ) = limits
 
-        targets.append(item)
+        item_with_limits = {**item, "purchase_limits": limits, "purchase_stats": purchase_stats}
+
+        targets.append(item_with_limits)
 
     total = len(targets)
     for idx, item in enumerate(targets, start=1):
         priceAnalys.set_progress(idx, total)
         name = item["name"]
         price = float(item["price"])
+        purchase_limits = item.get("purchase_limits")
+        purchase_stats = item.get("purchase_stats", {})
+        (
+            quantity_max_allowed,
+            sum_max_allowed,
+            purchased_lots,
+            purchased_sum,
+            time_lots,
+            time_sum,
+        ) = purchase_limits if purchase_limits else (0, 0, 0, 0, None, None)
 
         steam_url = build_steam_url(name)
 #         print(
@@ -279,12 +403,26 @@ def process_new_items(
         rec_price = float(result.get("rec_price", 0) or 0)
         avg_sales = float(result.get("avg_sales", 0) or 0)
 
-        if not within_purchase_limits(avg_sales, purchased_lots, purchased_sum):
-            print(
-                f"[LISS][INFO] {name}: достигнут лимит покупок",
-                proxy_tag=proxy_tag,
-            )
+        recalculated_limits = evaluate_purchase_limits(
+            name,
+            avg_sales,
+            purchased_lots,
+            purchased_sum,
+            time_lots,
+            time_sum,
+            has_db_entry=bool(purchase_stats.get("exists")),
+            proxy_tag=proxy_tag,
+        )
+        if recalculated_limits is None:
             continue
+        (
+            quantity_max_allowed,
+            sum_max_allowed,
+            purchased_lots,
+            purchased_sum,
+            time_lots,
+            time_sum,
+        ) = recalculated_limits
 
         adjusted_rec_price = rec_price * 0.8697
         if adjusted_rec_price <= 0:
@@ -305,7 +443,7 @@ def process_new_items(
         if profit > config.LISS_MIN_PROFIT:
             print(
                 f"[LISS] \"{name}\": {profit:.4f} выше {config.LISS_MIN_PROFIT} - "
-                "\033[92mapprove\033[0m",
+                f"\033[92mapprove\033[0m (qty_left={quantity_max_allowed:.2f}, sum_left={sum_max_allowed:.2f})",
                 proxy_tag=proxy_tag,
             )
         else:
