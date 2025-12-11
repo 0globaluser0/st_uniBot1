@@ -137,7 +137,7 @@ def evaluate_purchase_limits(
 ) -> Optional[Tuple[float, float, float, float, Optional[datetime], Optional[datetime]]]:
     now = datetime.utcnow()
     base_allowed_lots = (config.LISS_QUANTITY_PERCENT * avg_sales) / 100.0
-    quantity_max_allowed = base_allowed_lots
+    quantity_max_allowed = round(base_allowed_lots)
     sum_max_allowed = config.LISS_SUM_LIMIT
 
     normalized_time_lots = priceAnalys.parse_db_timestamp(time_lots)
@@ -150,14 +150,14 @@ def evaluate_purchase_limits(
 
     if has_db_entry:
         if normalized_time_lots and now - normalized_time_lots < timedelta(days=config.LISS_LOTS_PERIOD_DAYS):
-            quantity_max_allowed = base_allowed_lots - purchased_lots
+            quantity_max_allowed = round(base_allowed_lots - purchased_lots)
             if quantity_max_allowed <= 0:
                 print(f"[LISS][INFO] {name} достиг лимита по кол-ву", proxy_tag=proxy_tag)
                 return None
         else:
             updated_lots = 0.0
             updated_time_lots = now
-            quantity_max_allowed = base_allowed_lots
+            quantity_max_allowed = round(base_allowed_lots)
             changed = True
 
         if normalized_time_sum and now - normalized_time_sum < timedelta(days=config.LISS_SUM_PERIOD_DAYS):
