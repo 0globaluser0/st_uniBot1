@@ -7,7 +7,6 @@ import json
 import time
 import math
 import sqlite3
-import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
@@ -161,24 +160,6 @@ def format_db_timestamp(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat(timespec="seconds")
 
 
-def migrate_old_db_if_needed() -> None:
-    """Temporary migration from legacy analyser.db to steam_analyser.db."""
-
-    legacy_db = "analyser.db"
-    target_db = config.DB_PATH
-
-    # TODO: remove legacy analyser.db migration after transition period
-    if os.path.exists(target_db) or not os.path.exists(legacy_db):
-        return
-
-    try:
-        shutil.copy2(legacy_db, target_db)
-        print(
-            f"[DB][MIGRATION] Скопировал старую базу {legacy_db} в {target_db} без удаления исходника."
-        )
-    except Exception as exc:
-        print(f"[DB][MIGRATION][WARN] Не удалось скопировать {legacy_db} в {target_db}: {exc}")
-
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -231,7 +212,6 @@ def update_purchase_tracking(
 
 
 def init_db() -> None:
-    migrate_old_db_if_needed()
     ensure_directories()
     conn = get_conn()
     cur = conn.cursor()
