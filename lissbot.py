@@ -8,7 +8,7 @@
 import json
 import time
 from datetime import datetime
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -133,6 +133,7 @@ def within_purchase_limits(avg_sales: float, purchased_lots: float, purchased_su
 def evaluate_known_items(
     market_items: List[Dict[str, object]],
     known_items: List[Dict[str, object]],
+    stop_at: Optional[float] = None,
 ) -> Tuple[List[str], int, int]:
     market_map = {item["name"]: item for item in market_items}
     candidates = [item for item in known_items if item["name"] in market_map]
@@ -177,6 +178,10 @@ def evaluate_known_items(
         else:
             passed_filters += 1
 
+        if stop_at is not None and time.time() >= stop_at:
+            print("[LISS][TIMER] Таймер сработал во время проверки известных предметов, завершаем итерацию.")
+            break
+
     priceAnalys.set_progress(None, None)
     return processed, passed_filters, profit_passed
 
@@ -198,7 +203,7 @@ def get_purchase_stats(name: str) -> Tuple[float, float, float]:
 
 
 def process_new_items(
-    market_items: List[Dict[str, object]], processed_names: Iterable[str]
+    market_items: List[Dict[str, object]], processed_names: Iterable[str], stop_at: Optional[float] = None
 ) -> None:
     processed_set = set(processed_names)
 
@@ -309,10 +314,14 @@ def process_new_items(
                 proxy_tag=proxy_tag,
             )
 
+        if stop_at is not None and time.time() >= stop_at:
+            print("[LISS][TIMER] Таймер сработал во время обработки новочек, завершаем итерацию.")
+            break
+
     priceAnalys.set_progress(None, None)
 
 
-def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str) -> None:
+def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: float) -> None:
     priceAnalys.set_proxy_tag(None)
     priceAnalys.set_progress(None, None)
     print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
@@ -326,7 +335,7 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str) -> None:
     filtered_items = filter_by_keywords_and_price(market_items)
     known_items = load_known_items()
     processed_names, passed_filters, profit_passed = evaluate_known_items(
-        filtered_items, known_items
+        filtered_items, known_items, stop_at
     )
     remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
     print(
@@ -336,7 +345,11 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str) -> None:
         f"по прибыли {profit_passed}, "
         f"для новочек осталось {remaining_for_newcheck}"
     )
-    process_new_items(filtered_items, processed_names)
+    if stop_at is not None and time.time() >= stop_at:
+        print("[LISS][TIMER] Таймер сработал после предчека, запускаем следующий цикл без обработки новочек.")
+        return
+
+    process_new_items(filtered_items, processed_names, stop_at)
 
 
 def main() -> None:
@@ -347,29 +360,25 @@ def main() -> None:
     orange = "\033[38;5;208m"
     reset = "\033[0m"
 
-    while True:
-        iteration_started_at = time.time()
-        next_refresh_at = iteration_started_at + refresh_seconds
+    next_refresh_start = time.time()
 
+    while True:
         try:
-            run_refresh_cycle(refresh_seconds, orange, reset)
+            now = time.time()
+            if now < next_refresh_start:
+                time.sleep(next_refresh_start - now)
+
+            iteration_started_at = time.time()
+            stop_at = iteration_started_at + refresh_seconds
+            run_refresh_cycle(refresh_seconds, orange, reset, stop_at)
+
+            next_refresh_start = iteration_started_at + refresh_seconds
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
             break
         except Exception as exc:  # pragma: no cover - защита от неожиданных сбоев
             print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
-
-        now = time.time()
-        sleep_time = max(next_refresh_at - now, 0)
-        if sleep_time == 0:
-            print("[LISS][TIMER] Следующий парсинг запускается без ожидания (таймер истёк во время цикла).")
-
-        try:
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-        except KeyboardInterrupt:
-            print("[LISS] Остановка по запросу пользователя.")
-            break
+            next_refresh_start = time.time() + refresh_seconds
 
 
 if __name__ == "__main__":
