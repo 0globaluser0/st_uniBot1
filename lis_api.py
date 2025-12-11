@@ -9,6 +9,7 @@
 import json
 import math
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -163,6 +164,11 @@ def _fetch_lis_items(
             params=params,
             timeout=config.HTTP_TIMEOUT,
         )
+
+        if resp.status_code == 429:
+            time.sleep(2)
+            continue
+
         resp.raise_for_status()
         data = resp.json()
 
