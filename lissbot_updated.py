@@ -47,6 +47,18 @@ FULL_DUMP: Optional[FullDumpUpdater] = None
 ACTIVE_FULL_DB: Optional[Path] = None
 
 
+def _start_full_dump_scheduler(full_dump: FullDumpUpdater, refresh_seconds: int) -> None:
+    """Запускает фоновый поток, который триггерит обновление каждые refresh_seconds."""
+
+    def _worker() -> None:
+        while True:
+            time.sleep(refresh_seconds)
+            full_dump.trigger_async()
+
+    th = threading.Thread(target=_worker, name="FullDumpScheduler", daemon=True)
+    th.start()
+
+
 def auto_search_and_buy(
     *,
     item_name: str,
@@ -612,27 +624,18 @@ def main() -> None:
     print(f"[LISS] Активный индекс полного дампа: {ACTIVE_FULL_DB.name}")
     # Готовим обновление в фоне для следующего цикла
     FULL_DUMP.trigger_async()
+    _start_full_dump_scheduler(FULL_DUMP, refresh_seconds)
 
     switch_event = FULL_DUMP.get_switch_event()
 
-    next_refresh_start = time.time()
-
     while True:
         try:
-            now = time.time()
-            if now < next_refresh_start:
-                time.sleep(next_refresh_start - now)
-
             iteration_started_at = time.time()
 
-            # ВАЖНО: в начале итерации ждём завершения фонового обновления полного дампа
-            # (если оно было запущено в прошлую итерацию).
-            if FULL_DUMP is not None:
+            if FULL_DUMP is not None and switch_event.is_set():
                 FULL_DUMP.wait_update_complete()
                 ACTIVE_FULL_DB = FULL_DUMP.get_active_db_path()
-
-                # запускаем обновление полного дампа ДЛЯ СЛЕДУЮЩЕГО цикла СРАЗУ
-                FULL_DUMP.trigger_async()
+                switch_event.clear()
 
             stop_at = iteration_started_at + refresh_seconds
             should_restart = run_refresh_cycle(
@@ -643,17 +646,21 @@ def main() -> None:
                 stop_event=switch_event,
             )
 
-            if should_restart:
-                next_refresh_start = time.time()
-            else:
-                next_refresh_start = iteration_started_at + refresh_seconds
+            if should_restart and FULL_DUMP is not None:
+                FULL_DUMP.wait_update_complete()
+                ACTIVE_FULL_DB = FULL_DUMP.get_active_db_path()
+                switch_event.clear()
+                continue
+
+            sleep_left = stop_at - time.time()
+            if sleep_left > 0:
+                time.sleep(sleep_left)
 
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
             break
         except Exception as exc:  # защита от неожиданных сбоев
             print(f"[LISS][ERROR] Неожиданная ошибка в цикле: {exc}")
-            next_refresh_start = time.time() + refresh_seconds
 
 
 if __name__ == "__main__":
