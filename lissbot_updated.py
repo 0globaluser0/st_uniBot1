@@ -14,6 +14,7 @@
 
 import json
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -298,6 +299,7 @@ def evaluate_known_items(
     market_items: List[Dict[str, object]],
     known_items: List[Dict[str, object]],
     stop_at: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Tuple[List[str], int, int, int]:
     """
     Возвращает:
@@ -318,6 +320,10 @@ def evaluate_known_items(
 
     total = len(candidates)
     for idx, known in enumerate(candidates, start=1):
+        if stop_event and stop_event.is_set():
+            print("[LISS][INFO] Фоновое обновление полноты завершено, завершаем предчек.")
+            break
+
         priceAnalys.set_progress(idx, total)
         name = known["name"]
         market_item = market_map.get(name)
@@ -372,7 +378,7 @@ def evaluate_known_items(
         else:
             passed_filters += 1
 
-        if stop_at is not None and time.time() >= stop_at:
+        if (stop_event and stop_event.is_set()) or (stop_at is not None and time.time() >= stop_at):
             print("[LISS][TIMER] Таймер сработал во время проверки известных предметов, завершаем итерацию.")
             break
 
@@ -414,7 +420,10 @@ def get_purchase_stats(name: str) -> Dict[str, object]:
 
 
 def process_new_items(
-    market_items: List[Dict[str, object]], processed_names: Iterable[str], stop_at: Optional[float] = None
+    market_items: List[Dict[str, object]],
+    processed_names: Iterable[str],
+    stop_at: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     processed_set = set(processed_names)
 
@@ -450,6 +459,10 @@ def process_new_items(
 
     total = len(targets)
     for idx, item in enumerate(targets, start=1):
+        if stop_event and stop_event.is_set():
+            print("[LISS][INFO] Фоновое обновление завершено, останавливаем новочек.")
+            break
+
         priceAnalys.set_progress(idx, total)
         name = item["name"]
         price = float(item["price"])
@@ -529,14 +542,21 @@ def process_new_items(
         else:
             print(f"[LISS][INFO] {name}: расчётная прибыль {profit:.4f} ниже порога", proxy_tag=proxy_tag)
 
-        if stop_at is not None and time.time() >= stop_at:
+        if (stop_event and stop_event.is_set()) or (stop_at is not None and time.time() >= stop_at):
             print("[LISS][TIMER] Таймер сработал во время обработки новочек, завершаем итерацию.")
             break
 
     priceAnalys.set_progress(None, None)
 
 
-def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: float) -> None:
+def run_refresh_cycle(
+    refresh_seconds: int,
+    orange: str,
+    reset: str,
+    stop_at: float,
+    *,
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
     priceAnalys.set_proxy_tag(None)
     priceAnalys.set_progress(None, None)
     print(f"{orange}[LISS] Старт парсинга JSON прайс-листа{reset}")
@@ -545,12 +565,12 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: fl
         market_items = fetch_market_items()
     except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:  # type: ignore[attr-defined]
         print(f"[LISS][ERROR] Не удалось загрузить список предметов: {exc}")
-        return
+        return bool(stop_event and stop_event.is_set())
 
     filtered_items = filter_by_keywords_and_price(market_items)
     known_items = load_known_items()
     processed_names, passed_filters, profit_passed, purchased_items = evaluate_known_items(
-        filtered_items, known_items, stop_at
+        filtered_items, known_items, stop_at, stop_event
     )
     remaining_for_newcheck = max(len(filtered_items) - len(processed_names), 0)
     print(
@@ -566,7 +586,8 @@ def run_refresh_cycle(refresh_seconds: int, orange: str, reset: str, stop_at: fl
         print("[LISS][TIMER] Таймер сработал после предчека, запускаем следующий цикл без обработки новочек.")
         return
 
-    process_new_items(filtered_items, processed_names, stop_at)
+    process_new_items(filtered_items, processed_names, stop_at, stop_event)
+    return bool(stop_event and stop_event.is_set())
 
 
 def main() -> None:
@@ -592,6 +613,8 @@ def main() -> None:
     # Готовим обновление в фоне для следующего цикла
     FULL_DUMP.trigger_async()
 
+    switch_event = FULL_DUMP.get_switch_event()
+
     next_refresh_start = time.time()
 
     while True:
@@ -612,11 +635,18 @@ def main() -> None:
                 FULL_DUMP.trigger_async()
 
             stop_at = iteration_started_at + refresh_seconds
-            run_refresh_cycle(refresh_seconds, orange, reset, stop_at)
+            should_restart = run_refresh_cycle(
+                refresh_seconds,
+                orange,
+                reset,
+                stop_at,
+                stop_event=switch_event,
+            )
 
-
-
-            next_refresh_start = iteration_started_at + refresh_seconds
+            if should_restart:
+                next_refresh_start = time.time()
+            else:
+                next_refresh_start = iteration_started_at + refresh_seconds
 
         except KeyboardInterrupt:
             print("[LISS] Остановка по запросу пользователя.")
