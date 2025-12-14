@@ -322,6 +322,7 @@ class FullDumpUpdater:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._last_started = 0
+        self._switch_event = threading.Event()
 
         st = _read_state(self.paths.state)
         self._active = st.get("active")  # "A"/"B"/None
@@ -344,15 +345,22 @@ class FullDumpUpdater:
         print("[full_dump] Активный кэш отсутствует — выполняем первичную загрузку синхронно...")
         self._update_blocking()
 
-    def wait_update_complete(self) -> None:
+    def wait_update_complete(self, timeout: Optional[float] = None) -> bool:
         """
         Если в фоне идёт обновление — дождаться.
+        Возвращает True, если обновление завершено.
         """
         th = None
         with self._lock:
             th = self._thread
         if th and th.is_alive():
-            th.join()
+            th.join(timeout)
+            return not th.is_alive()
+        return True
+
+    def get_switch_event(self) -> threading.Event:
+        """Событие, которое устанавливается после переключения активного слота."""
+        return self._switch_event
 
     def trigger_async(self) -> None:
         """
@@ -367,6 +375,7 @@ class FullDumpUpdater:
             if self._last_started and (now - self._last_started) < self.refresh_seconds:
                 return
             self._last_started = now
+            self._switch_event.clear()
             self._thread = threading.Thread(target=self._update_blocking, name="FullDumpUpdater", daemon=True)
             self._thread.start()
 
@@ -396,5 +405,7 @@ class FullDumpUpdater:
 
         with self._lock:
             self._active = target
+
+        self._switch_event.set()
 
         print(f"[full_dump] Активный слот переключён на {target} (db={db_path.name})")
