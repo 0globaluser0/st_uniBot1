@@ -518,7 +518,7 @@ def _check_availability(
 
     available_ids: List[int] = []
     id_to_price: Dict[int, float] = {}
-    for chunk in _chunk_list(ids):
+    for chunk in _chunk_list(ids, MAX_IDS_PER_REQUEST):
         params: Dict[str, Any] = {"ids[]": chunk}
         print(
             f"[lis_purchase][{account.name}] "
@@ -652,6 +652,20 @@ def _buy_batch(
     min_price_override: float,
 ) -> Tuple[int, bool]:
     """Покупает один чанк id (<= MAX_IDS_PER_REQUEST). Возвращает (purchased, stop_flag)."""
+    if len(ids_to_buy) > MAX_IDS_PER_REQUEST:
+        total = 0
+        for sub_chunk in _chunk_list(ids_to_buy, MAX_IDS_PER_REQUEST):
+            purchased, stop = _buy_batch(
+                account,
+                item_name,
+                sub_chunk,
+                search_index,
+                min_price_override=min_price_override,
+            )
+            total += purchased
+            if stop:
+                return total, True
+        return total, False
     error_counters = {
         "skins_price_higher_than_max_price": 0,
         "invalid_ids_value": 0,
