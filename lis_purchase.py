@@ -35,8 +35,6 @@ from priceAnalys import (
     update_purchase_tracking,
 )
 
-MAX_IDS_PER_REQUEST = 100
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LISS_ACCS_FILE = os.path.join(BASE_DIR, "liss_accs.txt")
 
@@ -153,11 +151,6 @@ def send_lis_request(
             continue
 
         return resp
-
-
-def _chunk_list(items: List[int], size: int = MAX_IDS_PER_REQUEST) -> List[List[int]]:
-    """Разбивает список на чанки фиксированного размера."""
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # ---------- БД покупок {account_name}_liss_purchase.db ----------
@@ -516,67 +509,65 @@ def _check_availability(
     if not ids:
         return [], {}
 
+    params: Dict[str, Any] = {"ids[]": ids}
+    print(
+        f"[lis_purchase][{account.name}] "
+        f"Запрос /market/check-availability для {len(ids)} лотов..."
+    )
+    try:
+        resp = send_lis_request(
+            "GET",
+            CHECK_AVAIL_URL,
+            api_key=account.api_key,
+            params=params,
+        )
+    except requests.Timeout:
+        print(
+            f"[lis_purchase][{account.name}] Таймаут /market/check-availability, "
+            f"лоты будут пропущены."
+        )
+        return [], {}
+
+    if resp.status_code not in (200, 201):
+        print(
+            f"[lis_purchase][{account.name}] Ошибка {resp.status_code} "
+            f"при /market/check-availability, лоты будут пропущены."
+        )
+        return [], {}
+
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError:
+        print(
+            f"[lis_purchase][{account.name}] Ошибка парсинга JSON для /check-availability."
+        )
+        return [], {}
+
+    data = payload.get("data") or {}
+    available_skins = data.get("available_skins") or {}
+
     available_ids: List[int] = []
     id_to_price: Dict[int, float] = {}
-    for chunk in _chunk_list(ids):
-        params: Dict[str, Any] = {"ids[]": chunk}
-        print(
-            f"[lis_purchase][{account.name}] "
-            f"Запрос /market/check-availability для {len(chunk)} лотов..."
-        )
+    for key, value in available_skins.items():
         try:
-            resp = send_lis_request(
-                "GET",
-                CHECK_AVAIL_URL,
-                api_key=account.api_key,
-                params=params,
-            )
-        except requests.Timeout:
-            print(
-                f"[lis_purchase][{account.name}] Таймаут /market/check-availability, "
-                f"лоты будут пропущены."
-            )
-            return [], {}
+            lot_id = int(key)
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        available_ids.append(lot_id)
+        id_to_price[lot_id] = price
 
-        if resp.status_code not in (200, 201):
-            print(
-                f"[lis_purchase][{account.name}] Ошибка {resp.status_code} "
-                f"при /market/check-availability, лоты будут пропущены."
-            )
-            return [], {}
-
-        try:
-            payload = resp.json()
-        except json.JSONDecodeError:
-            print(
-                f"[lis_purchase][{account.name}] Ошибка парсинга JSON для /check-availability."
-            )
-            return [], {}
-
-        data = payload.get("data") or {}
-        available_skins = data.get("available_skins") or {}
-
-        for key, value in available_skins.items():
-            try:
-                lot_id = int(key)
-                price = float(value)
-            except (TypeError, ValueError):
-                continue
-            available_ids.append(lot_id)
-            id_to_price[lot_id] = price
-
-        unavailable = data.get("unavailable_skin_ids") or []
-        if unavailable:
-            print(
-                f"[lis_purchase][{account.name}] Недоступные id после check-availability: "
-                f"{unavailable}"
-            )
-
+    unavailable = data.get("unavailable_skin_ids") or []
+    if unavailable:
         print(
-            f"[lis_purchase][{account.name}] Доступно {len(available_skins)} лотов "
-            f"из {len(chunk)} по /check-availability."
+            f"[lis_purchase][{account.name}] Недоступные id после check-availability: "
+            f"{unavailable}"
         )
 
+    print(
+        f"[lis_purchase][{account.name}] Доступно {len(available_ids)} лотов "
+        f"из {len(ids)} по /check-availability."
+    )
     return available_ids, id_to_price
 
 
@@ -640,259 +631,7 @@ def _handle_buy_timeout(
                 f"[lis_purchase][{account.name}] По /market/info не найдено купленных лотов "
                 f"по custom_id={custom_id}."
             )
-    return purchased, failed_ids
-
-
-def _buy_batch(
-    account: LissAccount,
-    item_name: str,
-    ids_to_buy: List[int],
-    search_index: Dict[int, Dict[str, Any]],
-    *,
-    min_price_override: float,
-) -> Tuple[int, bool]:
-    """Покупает один чанк id (<= MAX_IDS_PER_REQUEST). Возвращает (purchased, stop_flag)."""
-    error_counters = {
-        "skins_price_higher_than_max_price": 0,
-        "invalid_ids_value": 0,
-        "invalid_max_price_value": 0,
-        "invalid_custom_id_value": 0,
-    }
-
-    id_to_price = {i: float(search_index[i]["price"]) for i in ids_to_buy}
-
-    while ids_to_buy:
-        custom_id = _random_custom_id()
-        print(
-            f"[lis_purchase][{account.name}] Попытка покупки {len(ids_to_buy)} лотов, "
-            f"custom_id={custom_id}"
-        )
-
-        sum_price = sum(id_to_price[i] for i in ids_to_buy)
-        max_price = sum_price + 0.02
-
-        body = {
-            "ids": ids_to_buy,
-            "partner": account.partner,
-            "token": account.token,
-            "max_price": max_price,
-            "custom_id": custom_id,
-            "skip_unavailable": True,
-        }
-
-        print(
-            f"[lis_purchase][{account.name}] POST /market/buy, "
-            f"max_price={max_price:.6f}, ids={ids_to_buy}"
-        )
-
-        try:
-            resp = send_lis_request(
-                "POST",
-                BUY_URL,
-                api_key=account.api_key,
-                json_data=body,
-                timeout=getattr(config, "HTTP_TIMEOUT", 20.0),
-            )
-        except requests.Timeout:
-            print(
-                f"[lis_purchase][{account.name}] Таймаут /market/buy, "
-                f"переходим к проверке /market/info..."
-            )
-            purchased, _failed_ids = _handle_buy_timeout(account, custom_id)
-            if purchased:
-                total, short_count, sum_price = _save_purchased_lots_to_db(
-                    account, item_name, purchased, search_index
-                )
-                _update_steam_item_counters(item_name, total, sum_price)
-                _update_short_hold_stats_and_maybe_min_price(account, short_count)
-                return total, False
-
-            print(
-                f"[lis_purchase][{account.name}] По /market/info покупка не подтвердилась, "
-                f"лоты будут пропущены."
-            )
-            return 0, True
-
-        print(
-            f"[lis_purchase][{account.name}] Ответ /market/buy: HTTP {resp.status_code}"
-        )
-
-        # 51) Успешный ответ
-        if resp.status_code in (200, 201):
-            try:
-                payload = resp.json()
-            except json.JSONDecodeError:
-                print(
-                    f"[lis_purchase][{account.name}] Ошибка парсинга JSON в ответе /market/buy."
-                )
-                return 0, True
-
-            purchased, failed_ids = _extract_successful_lots_from_buy_response(
-                payload, custom_id
-            )
-            total, short_count, sum_price = _save_purchased_lots_to_db(
-                account, item_name, purchased, search_index
-            )
-            _update_steam_item_counters(item_name, total, sum_price)
-            _update_short_hold_stats_and_maybe_min_price(account, short_count)
-
-            if failed_ids:
-                print(
-                    f"[lis_purchase][{account.name}] "
-                    f"{len(failed_ids)} лотов были отклонены логикой 77–78 и пропущены."
-                )
-            return total, False
-
-        # 52) HTTP 400
-        if resp.status_code == 400:
-            try:
-                payload = resp.json()
-            except json.JSONDecodeError:
-                print(
-                    f"[lis_purchase][{account.name}] HTTP 400 без корректного JSON, "
-                    f"лоты будут пропущены."
-                )
-                return 0, True
-
-            error_val = (payload.get("error") or "").strip()
-            print(f"[lis_purchase][{account.name}] HTTP 400 error={error_val!r}")
-
-            if error_val == "custom_id_already_exists":
-                print(
-                    f"[lis_purchase][{account.name}] custom_id_already_exists, "
-                    f"пробуем с новым custom_id..."
-                )
-                continue
-
-            if error_val == "skins_unavailable":
-                names = [search_index[i].get("name") for i in ids_to_buy if i in search_index]
-                print(
-                    f"[lis_purchase][{account.name}] Лоты недоступны (skins_unavailable): {names}"
-                )
-                return 0, True
-
-            if error_val == "skins_price_higher_than_max_price":
-                error_counters["skins_price_higher_than_max_price"] += 1
-                if error_counters["skins_price_higher_than_max_price"] >= 2:
-                    print(
-                        f"[lis_purchase][{account.name}] "
-                        f"skins_price_higher_than_max_price второй раз подряд, "
-                        f"лоты будут пропущены."
-                    )
-                    return 0, True
-
-                available_ids, id_price_map = _check_availability(account, ids_to_buy)
-                if not available_ids:
-                    print(
-                        f"[lis_purchase][{account.name}] После check-availability "
-                        f"нет доступных лотов, прекращаем."
-                    )
-                    return 0, True
-                ids_to_buy = available_ids
-                id_to_price = id_price_map
-                continue
-
-            if error_val in {
-                "invalid_trade_url",
-                "user_trade_ban",
-                "user_cant_trade",
-                "private_inventory",
-                "too_many_failed_attempts_for_user",
-            }:
-                print(
-                    f"[lis_purchase][{account.name}] Ошибка аккаунта {error_val!r}, "
-                    f"переходим к следующему аккаунту."
-                )
-                raise SkipAccountError(error_val)
-
-            print(
-                f"[lis_purchase][{account.name}] Неизвестная ошибка 400 {error_val!r}, "
-                f"лоты будут пропущены."
-            )
-            return 0, True
-
-        # 53) HTTP 422
-        if resp.status_code == 422:
-            try:
-                payload = resp.json()
-            except json.JSONDecodeError:
-                print(
-                    f"[lis_purchase][{account.name}] HTTP 422 без корректного JSON, "
-                    f"лоты будут пропущены."
-                )
-                return 0, True
-
-            error_val = (payload.get("error") or "").strip()
-            print(f"[lis_purchase][{account.name}] HTTP 422 error={error_val!r}")
-
-            if error_val in {"invalid_partner_value", "invalid_token_value"}:
-                print(
-                    f"[lis_purchase][{account.name}] Ошибка аккаунта {error_val!r}, "
-                    f"переходим к следующему аккаунту."
-                )
-                raise SkipAccountError(error_val)
-
-            if error_val in {"invalid_ids_value", "invalid_max_price_value"}:
-                error_counters[error_val] += 1
-                if error_counters[error_val] >= 2:
-                    print(
-                        f"[lis_purchase][{account.name}] {error_val} второй раз подряд, "
-                        f"лоты будут пропущены."
-                    )
-                    return 0, True
-
-                available_ids, id_price_map = _check_availability(account, ids_to_buy)
-                if not available_ids:
-                    print(
-                        f"[lis_purchase][{account.name}] После check-availability "
-                        f"нет доступных лотов, прекращаем."
-                    )
-                    return 0, True
-                ids_to_buy = available_ids
-                id_to_price = id_price_map
-                continue
-
-            if error_val == "invalid_custom_id_value":
-                error_counters["invalid_custom_id_value"] += 1
-                if error_counters["invalid_custom_id_value"] >= 2:
-                    print(
-                        f"[lis_purchase][{account.name}] invalid_custom_id_value второй раз подряд, "
-                        f"лоты будут пропущены."
-                    )
-                    return 0, True
-                print(
-                    f"[lis_purchase][{account.name}] invalid_custom_id_value, "
-                    f"пробуем с новым custom_id..."
-                )
-                continue
-
-            if error_val == "after_ids":
-                min_price_override = max(min_price_override, 0.01)
-                ids_to_buy = [
-                    lot_id
-                    for lot_id in ids_to_buy
-                    if float(search_index[lot_id].get("price", 0)) >= min_price_override
-                ]
-                id_to_price = {i: float(search_index[i]["price"]) for i in ids_to_buy}
-                print(
-                    f"[lis_purchase][{account.name}] after_ids, "
-                    f"повторяем покупку с min_price_override={min_price_override:.6f}"
-                )
-                continue
-
-            print(
-                f"[lis_purchase][{account.name}] Неизвестная ошибка 422 {error_val!r}, "
-                f"лоты будут пропущены."
-            )
-            return 0, True
-
-        print(
-            f"[lis_purchase][{account.name}] Неожиданный HTTP-код {resp.status_code}, "
-            f"лоты будут пропущены."
-        )
-        return 0, True
-
-    return 0, False
+        return purchased, failed_ids
 
     print(
         f"[lis_purchase][{account.name}] Ошибка {resp.status_code} по /market/info "
@@ -1046,20 +785,237 @@ def _buy_with_account(
         print(f"[lis_purchase][{account.name}] Не смогли извлечь id лотов.")
         return 0
 
-    total_purchased = 0
-    for batch in _chunk_list(ids, MAX_IDS_PER_REQUEST):
-        purchased, stop = _buy_batch(
-            account,
-            item_name,
-            batch,
-            search_index,
-            min_price_override=min_price_override,
-        )
-        total_purchased += purchased
-        if stop:
-            break
+    error_counters = {
+        "skins_price_higher_than_max_price": 0,
+        "invalid_ids_value": 0,
+        "invalid_max_price_value": 0,
+        "invalid_custom_id_value": 0,
+    }
 
-    return total_purchased
+    ids_to_buy = ids
+    id_to_price = {i: float(search_index[i]["price"]) for i in ids_to_buy}
+
+    while ids_to_buy:
+        custom_id = _random_custom_id()
+        print(
+            f"[lis_purchase][{account.name}] Попытка покупки {len(ids_to_buy)} лотов, "
+            f"custom_id={custom_id}"
+        )
+
+        sum_price = sum(id_to_price[i] for i in ids_to_buy)
+        max_price = sum_price + 0.02
+
+        body = {
+            "ids": ids_to_buy,
+            "partner": account.partner,
+            "token": account.token,
+            "max_price": max_price,
+            "custom_id": custom_id,
+            "skip_unavailable": True,
+        }
+
+        print(
+            f"[lis_purchase][{account.name}] POST /market/buy, "
+            f"max_price={max_price:.6f}, ids={ids_to_buy}"
+        )
+
+        try:
+            resp = send_lis_request(
+                "POST",
+                BUY_URL,
+                api_key=account.api_key,
+                json_data=body,
+                timeout=getattr(config, "HTTP_TIMEOUT", 20.0),
+            )
+        except requests.Timeout:
+            print(
+                f"[lis_purchase][{account.name}] Таймаут /market/buy, "
+                f"переходим к проверке /market/info..."
+            )
+            purchased, _failed_ids = _handle_buy_timeout(account, custom_id)
+            if purchased:
+                total, short_count, sum_price = _save_purchased_lots_to_db(
+                    account, item_name, purchased, search_index
+                )
+                _update_steam_item_counters(item_name, total, sum_price)
+                _update_short_hold_stats_and_maybe_min_price(account, short_count)
+                return total
+
+            print(
+                f"[lis_purchase][{account.name}] По /market/info покупка не подтвердилась, "
+                f"лоты будут пропущены."
+            )
+            return 0
+
+        print(
+            f"[lis_purchase][{account.name}] Ответ /market/buy: HTTP {resp.status_code}"
+        )
+
+        # 51) Успешный ответ
+        if resp.status_code in (200, 201):
+            try:
+                payload = resp.json()
+            except json.JSONDecodeError:
+                print(
+                    f"[lis_purchase][{account.name}] Ошибка парсинга JSON в ответе /market/buy."
+                )
+                return 0
+
+            purchased, failed_ids = _extract_successful_lots_from_buy_response(
+                payload, custom_id
+            )
+            total, short_count, sum_price = _save_purchased_lots_to_db(
+                account, item_name, purchased, search_index
+            )
+            _update_steam_item_counters(item_name, total, sum_price)
+            _update_short_hold_stats_and_maybe_min_price(account, short_count)
+
+            if failed_ids:
+                print(
+                    f"[lis_purchase][{account.name}] "
+                    f"{len(failed_ids)} лотов были отклонены логикой 77–78 и пропущены."
+                )
+            return total
+
+
+
+        # 52) HTTP 400
+        if resp.status_code == 400:
+            try:
+                payload = resp.json()
+            except json.JSONDecodeError:
+                print(
+                    f"[lis_purchase][{account.name}] HTTP 400 без корректного JSON, "
+                    f"лоты будут пропущены."
+                )
+                return 0
+
+            error_val = (payload.get("error") or "").strip()
+            print(f"[lis_purchase][{account.name}] HTTP 400 error={error_val!r}")
+
+            if error_val == "custom_id_already_exists":
+                print(
+                    f"[lis_purchase][{account.name}] custom_id_already_exists, "
+                    f"пробуем с новым custom_id..."
+                )
+                continue
+
+            if error_val == "skins_unavailable":
+                names = [search_index[i].get("name") for i in ids_to_buy if i in search_index]
+                print(
+                    f"[lis_purchase][{account.name}] Лоты недоступны (skins_unavailable): {names}"
+                )
+                return 0
+
+            if error_val == "skins_price_higher_than_max_price":
+                error_counters["skins_price_higher_than_max_price"] += 1
+                if error_counters["skins_price_higher_than_max_price"] >= 2:
+                    print(
+                        f"[lis_purchase][{account.name}] "
+                        f"skins_price_higher_than_max_price второй раз подряд, "
+                        f"лоты будут пропущены."
+                    )
+                    return 0
+
+                available_ids, id_price_map = _check_availability(account, ids_to_buy)
+                if not available_ids:
+                    print(
+                        f"[lis_purchase][{account.name}] После check-availability "
+                        f"нет доступных лотов, прекращаем."
+                    )
+                    return 0
+                ids_to_buy = available_ids
+                id_to_price = id_price_map
+                continue
+
+            if error_val in {
+                "invalid_trade_url",
+                "user_trade_ban",
+                "user_cant_trade",
+                "private_inventory",
+                "too_many_failed_attempts_for_user",
+            }:
+                print(
+                    f"[lis_purchase][{account.name}] Ошибка аккаунта {error_val!r}, "
+                    f"переходим к следующему аккаунту."
+                )
+                raise SkipAccountError(error_val)
+
+            print(
+                f"[lis_purchase][{account.name}] Неизвестная ошибка 400 {error_val!r}, "
+                f"лоты будут пропущены."
+            )
+            return 0
+
+        # 53) HTTP 422
+        if resp.status_code == 422:
+            try:
+                payload = resp.json()
+            except json.JSONDecodeError:
+                print(
+                    f"[lis_purchase][{account.name}] HTTP 422 без корректного JSON, "
+                    f"лоты будут пропущены."
+                )
+                return 0
+
+            error_val = (payload.get("error") or "").strip()
+            print(f"[lis_purchase][{account.name}] HTTP 422 error={error_val!r}")
+
+            if error_val in {"invalid_partner_value", "invalid_token_value"}:
+                print(
+                    f"[lis_purchase][{account.name}] Ошибка аккаунта {error_val!r}, "
+                    f"переходим к следующему аккаунту."
+                )
+                raise SkipAccountError(error_val)
+
+            if error_val in {"invalid_ids_value", "invalid_max_price_value"}:
+                error_counters[error_val] += 1
+                if error_counters[error_val] >= 2:
+                    print(
+                        f"[lis_purchase][{account.name}] {error_val} второй раз подряд, "
+                        f"лоты будут пропущены."
+                    )
+                    return 0
+
+                available_ids, id_price_map = _check_availability(account, ids_to_buy)
+                if not available_ids:
+                    print(
+                        f"[lis_purchase][{account.name}] После check-availability "
+                        f"нет доступных лотов, прекращаем."
+                    )
+                    return 0
+                ids_to_buy = available_ids
+                id_to_price = id_price_map
+                continue
+
+            if error_val == "invalid_custom_id_value":
+                error_counters["invalid_custom_id_value"] += 1
+                if error_counters["invalid_custom_id_value"] >= 2:
+                    print(
+                        f"[lis_purchase][{account.name}] invalid_custom_id_value "
+                        f"второй раз подряд, лоты будут пропущены."
+                    )
+                    return 0
+                print(
+                    f"[lis_purchase][{account.name}] invalid_custom_id_value, "
+                    f"пробуем с новым custom_id..."
+                )
+                continue
+
+            print(
+                f"[lis_purchase][{account.name}] Неизвестная ошибка 422 {error_val!r}, "
+                f"лоты будут пропущены."
+            )
+            return 0
+
+        print(
+            f"[lis_purchase][{account.name}] Неожиданный HTTP-код {resp.status_code}, "
+            f"лоты будут пропущены."
+        )
+        return 0
+
+    return 0
+
 
 # ---------- Публичная функция для использования из lissbot.py ----------
 
